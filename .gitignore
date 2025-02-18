@@ -4,6 +4,8 @@ Dataset/
 __pycache__/
 nets/__pycache__/
 utils/__pycache__/
+LIVECell_dataset_2021/
 weights/
+weights_cell/
 README.md
 README.pdf

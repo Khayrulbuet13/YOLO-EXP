@@ -55,10 +55,10 @@ def train(args, params):
     ema = util.EMA(model) if args.local_rank == 0 else None
 
     filenames = []
-    with open('./Dataset/COCO/train2017.txt') as reader:
+    with open('./Dataset/blood-cell/train.txt') as reader:
         for filename in reader.readlines():
             filename = filename.rstrip().split('/')[-1]
-            filenames.append('./Dataset/COCO/images/train2017/' + filename)
+            filenames.append('./Dataset/blood-cell/images/train/' + filename)
 
     dataset = Dataset(filenames, args.input_size, params, True)
 
@@ -83,7 +83,7 @@ def train(args, params):
     amp_scale = torch.cuda.amp.GradScaler()
     criterion = util.ComputeLoss(model, params)
     num_warmup = max(round(params['warmup_epochs'] * num_batch), 1000)
-    with open('weights/step.csv', 'w') as f:
+    with open(os.path.join(args.save_path, 'step.csv'), 'w') as f:
         if args.local_rank == 0:
             writer = csv.DictWriter(f, fieldnames=['epoch', 'mAP@50', 'mAP'])
             writer.writeheader()
@@ -175,14 +175,14 @@ def train(args, params):
                 ckpt = {'model': copy.deepcopy(ema.ema).half()}
 
                 # Save last, best and delete
-                torch.save(ckpt, './weights/last.pt')
+                torch.save(ckpt, os.path.join(args.save_path, 'last.pt'))
                 if best == last[1]:
-                    torch.save(ckpt, './weights/best.pt')
+                    torch.save(ckpt, os.path.join(args.save_path, 'best.pt'))
                 del ckpt
 
     if args.local_rank == 0:
-        util.strip_optimizer('./weights/best.pt')  # strip optimizers
-        util.strip_optimizer('./weights/last.pt')  # strip optimizers
+        util.strip_optimizer(os.path.join(args.save_path, 'best.pt'))  # strip optimizers
+        util.strip_optimizer(os.path.join(args.save_path, 'last.pt'))  # strip optimizers
 
     torch.cuda.empty_cache()
 
@@ -190,17 +190,17 @@ def train(args, params):
 @torch.no_grad()
 def test(args, params, model=None):
     filenames = []
-    with open('./Dataset/COCO/val2017.txt') as reader:
+    with open('./Dataset/blood-cell/val.txt') as reader:
         for filename in reader.readlines():
             filename = filename.rstrip().split('/')[-1]
-            filenames.append('./Dataset/COCO/images/val2017/' + filename)
+            filenames.append('./Dataset/blood-cell/images/val/' + filename)
 
     dataset = Dataset(filenames, args.input_size, params, False)
     loader = data.DataLoader(dataset, 8, False, num_workers=8,
                              pin_memory=True, collate_fn=Dataset.collate_fn)
 
     if model is None:
-        model = torch.load('./weights/best.pt', map_location='cuda')['model'].float()
+        model = torch.load(os.path.join(args.save_path, 'best.pt'), map_location='cuda')['model'].float()
 
     model.half()
     model.eval()
@@ -282,7 +282,6 @@ def test(args, params, model=None):
     model.float()  # for training
     return map50, mean_ap
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-size', default=640, type=int)
@@ -291,6 +290,10 @@ def main():
     parser.add_argument('--epochs', default=500, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
+    parser.add_argument('--yaml_file', type=str, default='utils/args_blood.yaml', 
+                        help='Path to the YAML configuration file')
+    parser.add_argument('--save-path', type=str, default='weights_cell',
+                        help='Directory to save model weights and logs')
 
     args = parser.parse_args()
 
@@ -302,13 +305,13 @@ def main():
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
     if args.local_rank == 0:
-        if not os.path.exists('weights'):
-            os.makedirs('weights')
+        if not os.path.exists(args.save_path):
+            os.makedirs(args.save_path)
 
     util.setup_seed()
     util.setup_multi_processes()
 
-    with open(os.path.join('utils', 'args.yaml'), errors='ignore') as f:
+    with open(args.yaml_file, 'r') as f:
         params = yaml.safe_load(f)
 
     if args.train:
