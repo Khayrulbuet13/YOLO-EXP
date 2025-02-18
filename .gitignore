@@ -1,0 +1,7 @@
+.dump/
+.vscode/
+Dataset/
+__pycache__/
+nets/__pycache__/
+utils/__pycache__/
+weights/

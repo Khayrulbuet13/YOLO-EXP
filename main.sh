@@ -1,2 +1,3 @@
 GPUS=$1
-python3 -m torch.distributed.launch --nproc_per_node=$GPUS main.py ${@:2}
+export OMP_NUM_THREADS=8
+torchrun --nproc_per_node=$GPUS main.py ${@:2}

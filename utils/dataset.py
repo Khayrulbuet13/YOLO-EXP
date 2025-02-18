@@ -182,7 +182,11 @@ class Dataset(data.Dataset):
     def collate_fn(batch):
         samples, targets, shapes = zip(*batch)
         for i, item in enumerate(targets):
-            item[:, 0] = i  # add target image index
+            # Move existing columns right by 1 and insert batch index at front
+            if len(item):
+                item_copy = item.clone()
+                item[:, 1:] = item_copy[:, :-1]  # Shift existing columns right
+                item[:, 0] = i  # Add batch index in first column
         return torch.stack(samples, 0), torch.cat(targets, 0), shapes
 
     @staticmethod
@@ -213,6 +217,10 @@ class Dataset(data.Dataset):
                         assert label.shape[1] == 5, 'labels require 5 columns'
                         assert (label >= 0).all(), 'negative label values'
                         assert (label[:, 1:] <= 1).all(), 'non-normalized coordinates'
+                        # Debug print for label values
+                        if (label[:, 0] >= 80).any():
+                            print(f"Warning: Found invalid class IDs in {filename}")
+                            print("Invalid class IDs:", label[label[:, 0] >= 80, 0])
                         _, i = numpy.unique(label, axis=0, return_index=True)
                         if len(i) < nl:  # duplicate row check
                             label = label[i]  # remove duplicates

@@ -55,10 +55,10 @@ def train(args, params):
     ema = util.EMA(model) if args.local_rank == 0 else None
 
     filenames = []
-    with open('../Dataset/COCO/train2017.txt') as reader:
+    with open('./Dataset/COCO/train2017.txt') as reader:
         for filename in reader.readlines():
             filename = filename.rstrip().split('/')[-1]
-            filenames.append('../Dataset/COCO/images/train2017/' + filename)
+            filenames.append('./Dataset/COCO/images/train2017/' + filename)
 
     dataset = Dataset(filenames, args.input_size, params, True)
 
@@ -190,10 +190,10 @@ def train(args, params):
 @torch.no_grad()
 def test(args, params, model=None):
     filenames = []
-    with open('../Dataset/COCO/val2017.txt') as reader:
+    with open('./Dataset/COCO/val2017.txt') as reader:
         for filename in reader.readlines():
             filename = filename.rstrip().split('/')[-1]
-            filenames.append('../Dataset/COCO/images/val2017/' + filename)
+            filenames.append('./Dataset/COCO/images/val2017/' + filename)
 
     dataset = Dataset(filenames, args.input_size, params, False)
     loader = data.DataLoader(dataset, 8, False, num_workers=8,
@@ -287,7 +287,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-size', default=640, type=int)
     parser.add_argument('--batch-size', default=32, type=int)
-    parser.add_argument('--local_rank', default=0, type=int)
+    parser.add_argument('--local_rank', '--local-rank', default=0, type=int)
     parser.add_argument('--epochs', default=500, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
