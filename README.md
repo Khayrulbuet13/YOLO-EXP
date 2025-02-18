@@ -60,21 +60,4 @@ pip install tqdm
 
 
 
-## Things I have changed
-
-
-File: utils/dataset.py
-
-```python
-@staticmethod
-def collate_fn(batch):
-    samples, targets, shapes = zip(*batch)
-    for i, item in enumerate(targets):
-        # Move existing columns right by 1 and insert batch index at front
-        if len(item):
-            item_copy = item.clone()
-            item[:, 1:] = item_copy[:, :-1]  # Shift existing columns right
-            item[:, 0] = i  # Add batch index in first column
-    return torch.stack(samples, 0), torch.cat(targets, 0), shapes
-```
 
