@@ -5,3 +5,5 @@ __pycache__/
 nets/__pycache__/
 utils/__pycache__/
 weights/
+README.md
+README.pdf
