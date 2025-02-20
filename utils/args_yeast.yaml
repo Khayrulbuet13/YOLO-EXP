@@ -21,5 +21,5 @@ mosaic: 1.00000               # image mosaic (probability)
 mix_up: 0.00000               # image mix-up (probability)
 # classes
 names:
-  0: bloodcell
-  1: other
+  0: trap
+  1: cell

@@ -17,6 +17,7 @@ class Dataset(data.Dataset):
         self.mosaic = augment
         self.augment = augment
         self.input_size = input_size
+        self.num_classes = len(params['names'])
 
         # Read labels
         cache = self.load_label(filenames)
@@ -182,15 +183,14 @@ class Dataset(data.Dataset):
     def collate_fn(batch):
         samples, targets, shapes = zip(*batch)
         for i, item in enumerate(targets):
-            # Move existing columns right by 1 and insert batch index at front
-            if len(item):
-                item_copy = item.clone()
-                item[:, 1:] = item_copy[:, :-1]  # Shift existing columns right
-                item[:, 0] = i  # Add batch index in first column
+            item[:, 0] = i  # add target image index
         return torch.stack(samples, 0), torch.cat(targets, 0), shapes
 
-    @staticmethod
-    def load_label(filenames):
+    
+
+
+
+    def load_label(self, filenames):
         path = f'{os.path.dirname(filenames[0])}.cache'
         if os.path.exists(path):
             return torch.load(path)
@@ -217,10 +217,15 @@ class Dataset(data.Dataset):
                         assert label.shape[1] == 5, 'labels require 5 columns'
                         assert (label >= 0).all(), 'negative label values'
                         assert (label[:, 1:] <= 1).all(), 'non-normalized coordinates'
-                        # Debug print for label values
-                        if (label[:, 0] >= 80).any():
+                        
+                        # Validate class IDs
+                        invalid_classes = label[label[:, 0] >= self.num_classes]
+                        if len(invalid_classes) > 0:
                             print(f"Warning: Found invalid class IDs in {filename}")
-                            print("Invalid class IDs:", label[label[:, 0] >= 80, 0])
+                            print("Invalid class IDs:", invalid_classes[:, 0])
+                            # Filter out invalid classes
+                            label = label[label[:, 0] < self.num_classes]
+                            
                         _, i = numpy.unique(label, axis=0, return_index=True)
                         if len(i) < nl:  # duplicate row check
                             label = label[i]  # remove duplicates
