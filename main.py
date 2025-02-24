@@ -12,7 +12,7 @@ import tqdm
 import yaml
 from torch.utils import data
 
-from nets import nn
+from nets import pico
 from utils import util
 from utils.dataset import Dataset
 
@@ -34,7 +34,7 @@ def train(args, params):
     # -----------------------------------------------
     # 1) Build model
     # -----------------------------------------------
-    model = nn.yolo_v8_n(len(params['names'].values())).cuda()
+    model = pico.yolo_v8_p(len(params['names'].values())).cuda()
 
     # -----------------------------------------------
     # 2) Optimizer & Scheduler
