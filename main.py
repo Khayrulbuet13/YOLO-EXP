@@ -13,6 +13,7 @@ import yaml
 from torch.utils import data
 
 from nets import pico
+from nets import tinysimo
 from utils import util
 from utils.dataset import Dataset
 
@@ -34,7 +35,8 @@ def train(args, params):
     # -----------------------------------------------
     # 1) Build model
     # -----------------------------------------------
-    model = pico.yolo_v8_p(len(params['names'].values())).cuda()
+    num_classes = len(params['names'].values())
+    model = tinysimo.yolo_v8(num_classes).cuda()
 
     # -----------------------------------------------
     # 2) Optimizer & Scheduler
@@ -243,8 +245,15 @@ def train(args, params):
 
 
 def generate_colors(num_classes):
-    """Helper function to generate random colors for each class."""
-    return {i: tuple(np.random.randint(0, 256, 3).tolist()) for i in range(num_classes)}
+    """
+    Helper function to generate random colors for each class.
+    Ensures colors are created for all possible class IDs up to num_classes.
+    """
+    np.random.seed(42)  # For consistent colors
+    colors = {}
+    for i in range(num_classes):
+        colors[i] = tuple(np.random.randint(0, 256, 3).tolist())
+    return colors
 
 
 def visualize_predictions(samples, outputs, gt_boxes, shapes, params, class_colors, results_dir, index):
