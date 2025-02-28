@@ -1,3 +1,4 @@
+from utils.comet_logger import CometLogger
 import argparse
 import copy
 import csv
@@ -12,12 +13,18 @@ import tqdm
 import yaml
 from torch.utils import data
 
+
 from nets import pico
 from nets import tinysimo
 from utils import util
+from utils.util import GeneralizedBackboneWrapper, generate_colors, visualize_predictions
 from utils.dataset import Dataset
 
+from torchsummary import summary
+from contextlib import redirect_stdout
+
 warnings.filterwarnings("ignore")
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 def learning_rate(args, params):
@@ -33,10 +40,59 @@ def train(args, params):
     measurement and visualization of first 5 images from validation set.
     """
     # -----------------------------------------------
-    # 1) Build model
+    # 1) Initialize Comet Logger and Build model
     # -----------------------------------------------
+    # Initialize Comet logger if we're the main process
+    comet_logger = None
+    if args.local_rank == 0:
+        comet_logger = CometLogger(args, params)
+    
     num_classes = len(params['names'].values())
-    model = tinysimo.yolo_v8(num_classes).cuda()
+    model = tinysimo.yolo_v8_s(num_classes).cuda()
+    
+    # Create backbone wrapper and save model summary
+    if args.local_rank == 0:
+        # Ensure results directory exists
+        os.makedirs(args.save_path, exist_ok=True)
+        
+        # # Create a wrapper for the backbone
+        # class BackboneWrapper(torch.nn.Module):
+        #     def __init__(self):
+        #         super().__init__()
+        #         # Create YOLO model and get its backbone
+        #         self.model = model
+        #         self.backbone = self.model.net
+            
+        #     def forward(self, x):
+        #         # Return all feature maps from backbone
+        #         return self.backbone(x)
+        
+        # # Create and move model to GPU
+        # backbone_model = BackboneWrapper().cuda()
+        
+        # # Save model summary to a text file in results directory
+        # from contextlib import redirect_stdout
+        # summary_path = os.path.join(args.save_path, 'model_summary.txt')
+        # with open(summary_path, 'w') as f:
+        #     with redirect_stdout(f):
+        #         from torchsummary import summary
+        #         summary(backbone_model, (3, 640, 640))
+        
+        # Create a generalized wrapper for any model
+        summary_path = os.path.join(args.save_path, 'model_summary.txt')
+        generalized_model = GeneralizedBackboneWrapper(model.net).cuda()
+
+        # Save model summary to a text file
+        with open(summary_path, 'w') as f:
+            with redirect_stdout(f):
+                summary(generalized_model, (3, 640, 640))
+        
+        print(f"Model summary saved to {summary_path}")
+        
+        # Log source code from nets/ directory
+        if comet_logger:
+            comet_logger.log_source_code('nets/')
+            comet_logger.log_model_summary()
 
     # -----------------------------------------------
     # 2) Optimizer & Scheduler
@@ -118,7 +174,11 @@ def train(args, params):
     # step.csv for logging
     with open(os.path.join(args.save_path, 'step.csv'), 'w', newline='') as csv_f:
         if args.local_rank == 0:
-            writer = csv.DictWriter(csv_f, fieldnames=['epoch', 'mAP@50', 'mAP', 'Precision', 'Recall', 'F1'])
+            writer = csv.DictWriter(csv_f, fieldnames=[
+                'epoch', 
+                'train_mAP@50', 'train_mAP', 'train_Precision', 'train_Recall', 'train_F1',
+                'val_mAP@50', 'val_mAP', 'val_Precision', 'val_Recall', 'val_F1'
+            ])
             writer.writeheader()
 
         # ---------------------
@@ -193,11 +253,17 @@ def train(args, params):
                     if ema:
                         ema.update(model)
 
-                # For local_rank=0, print progress
+                # For local_rank=0, print progress and log to Comet
                 if args.local_rank == 0:
                     memory = f'{torch.cuda.memory_reserved() / 1E9:.3g}G'
                     s = ('%10s' * 2 + '%10.4g') % (f'{epoch + 1}/{args.epochs}', memory, m_loss.avg)
                     p_bar.set_description(s)
+                    
+                    # Log batch metrics to Comet
+                    if comet_logger:
+                        # Get current learning rate
+                        current_lr = optimizer.param_groups[0]['lr']
+                        comet_logger.log_batch_metrics(m_loss.avg, current_lr, epoch, i, num_batch)
 
                 del loss, outputs
 
@@ -205,34 +271,53 @@ def train(args, params):
             scheduler.step()
 
             # -----------------------------------------------
-            # 7) Validation & Logging
+            # 7) Evaluation & Logging
             # -----------------------------------------------
             if args.local_rank == 0:
-                # Evaluate (test) -> returns (tp, fp, precision, recall, map50, mean_ap)
-                tp, fp, precision, recall, map50, mean_ap = test(args, params, ema.ema)
+                # Evaluate on training data
+                print("Evaluating on training data...")
+                train_tp, train_fp, train_precision, train_recall, train_map50, train_mean_ap = test(args, params, ema.ema, is_train=True)
+                train_f1 = 2 * train_precision * train_recall / (train_precision + train_recall + 1e-16)
+                
+                # Evaluate on validation data
+                print("Evaluating on validation data...")
+                val_tp, val_fp, val_precision, val_recall, val_map50, val_mean_ap = test(args, params, ema.ema, is_train=False)
+                val_f1 = 2 * val_precision * val_recall / (val_precision + val_recall + 1e-16)
 
-                # Compute F1
-                f1 = 2 * precision * recall / (precision + recall + 1e-16)
-
-                # Write row in step.csv
+                # Write row in step.csv with both train and val metrics
                 writer.writerow({
                     'epoch': str(epoch + 1).zfill(3),
-                    'mAP@50': f'{map50:.3f}',
-                    'mAP': f'{mean_ap:.3f}',
-                    'Precision': f'{precision:.3f}',
-                    'Recall': f'{recall:.3f}',
-                    'F1': f'{f1:.3f}'
+                    'train_mAP@50': f'{train_map50:.3f}',
+                    'train_mAP': f'{train_mean_ap:.3f}',
+                    'train_Precision': f'{train_precision:.3f}',
+                    'train_Recall': f'{train_recall:.3f}',
+                    'train_F1': f'{train_f1:.3f}',
+                    'val_mAP@50': f'{val_map50:.3f}',
+                    'val_mAP': f'{val_mean_ap:.3f}',
+                    'val_Precision': f'{val_precision:.3f}',
+                    'val_Recall': f'{val_recall:.3f}',
+                    'val_F1': f'{val_f1:.3f}'
                 })
                 csv_f.flush()
+                
+                # Log epoch metrics to Comet
+                if comet_logger:
+                    # Log training metrics
+                    comet_logger.log_epoch_metrics(epoch, train_map50, train_mean_ap, train_precision, train_recall, train_f1, phase="train")
+                    # Log validation metrics
+                    comet_logger.log_epoch_metrics(epoch, val_map50, val_mean_ap, val_precision, val_recall, val_f1, phase="val")
+                    # Log visualization images
+                    results_dir = os.path.join(args.save_path, 'results')
+                    comet_logger.log_images_from_dir(results_dir)
 
-                # Update best
-                if mean_ap > best:
-                    best = mean_ap
+                # Update best based on validation mAP
+                if val_mean_ap > best:
+                    best = val_mean_ap
 
                 # Save model: last & best
                 ckpt = {'model': copy.deepcopy(ema.ema).half()}
                 torch.save(ckpt, os.path.join(args.save_path, 'last.pt'))
-                if best == mean_ap:
+                if best == val_mean_ap:
                     torch.save(ckpt, os.path.join(args.save_path, 'best.pt'))
                 del ckpt
 
@@ -240,122 +325,53 @@ def train(args, params):
     if args.local_rank == 0:
         util.strip_optimizer(os.path.join(args.save_path, 'best.pt'))
         util.strip_optimizer(os.path.join(args.save_path, 'last.pt'))
+        
+        # End Comet experiment
+        if comet_logger:
+            comet_logger.end()
 
     torch.cuda.empty_cache()
 
 
-def generate_colors(num_classes):
-    """
-    Helper function to generate random colors for each class.
-    Ensures colors are created for all possible class IDs up to num_classes.
-    """
-    np.random.seed(42)  # For consistent colors
-    colors = {}
-    for i in range(num_classes):
-        colors[i] = tuple(np.random.randint(0, 256, 3).tolist())
-    return colors
-
-
-def visualize_predictions(samples, outputs, gt_boxes, shapes, params, class_colors, results_dir, index):
-    """
-    Visualize first 5 images from the val set: draws ground-truth boxes on the
-    left, predicted boxes on the right, and saves side-by-side images.
-    """
-    # Convert single image to CPU numpy
-    img = samples[0].cpu().float().numpy()
-    img = img.transpose((1, 2, 0))  # CHW -> HWC
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    img = (img * 255).astype(np.uint8)
-
-    # Remove padding, resize back
-    original_shape = shapes[0][0]
-    pad_w, pad_h = shapes[0][1][1]
-    h, w = img.shape[:2]
-    img = img[int(pad_h):int(h - pad_h), int(pad_w):int(w - pad_w)]
-    img = cv2.resize(img, (int(original_shape[1]), int(original_shape[0])))
-
-    img_gt = img.copy()
-    img_pred = img.copy()
-
-    # Draw GT
-    for gt in gt_boxes:
-        cls_gt = int(gt[1])
-        coords = gt[2:].cpu().numpy()
-        x_c, y_c = coords[0], coords[1]
-        w_b, h_b = coords[2], coords[3]
-
-        # Convert to corner coordinates
-        x1 = int(x_c - w_b / 2)
-        y1 = int(y_c - h_b / 2)
-        x2 = int(x_c + w_b / 2)
-        y2 = int(y_c + h_b / 2)
-        color = tuple(map(int, class_colors[cls_gt]))
-        cv2.rectangle(img_gt, (x1, y1), (x2, y2), color, 2)
-        if cls_gt in params['names']:
-            cls_name = params['names'][cls_gt]
-        else:
-            cls_name = str(cls_gt)
-        cv2.putText(img_gt, cls_name, (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-    # Draw predictions
-    if outputs[0] is not None:
-        
-        # Scale predictions using util.scale like in test function
-        det_clone = outputs[0].clone()
-        util.scale(det_clone[:, :4], samples[0].shape[1:], shapes[0][0], shapes[0][1])
-        
-        for det in det_clone.cpu().numpy():
-            x1, y1, x2, y2, conf, cls_id = det
-            cls_id = int(cls_id)
-            color = tuple(map(int, class_colors[cls_id]))
-            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-            if cls_id in params['names']:
-                cls_name = params['names'][cls_id]
-            else:
-                cls_name = str(cls_id)
-            cv2.rectangle(img_pred, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(img_pred, f"{cls_name} {conf:.2f}",
-                        (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-    # Save side-by-side
-    plt.figure(figsize=(20, 10))
-    plt.subplot(1, 2, 1)
-    plt.imshow(cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB))
-    plt.title('Ground Truth')
-    plt.axis('off')
-
-    plt.subplot(1, 2, 2)
-    plt.imshow(cv2.cvtColor(img_pred, cv2.COLOR_BGR2RGB))
-    plt.title('Predictions')
-    plt.axis('off')
-
-    save_path = os.path.join(results_dir, f'result_{index}.png')
-    plt.savefig(save_path)
-    plt.close()
 
 
 @torch.no_grad()
-def test(args, params, model=None):
+def test(args, params, model=None, is_train=False):
     """
     Similar to the 'old version' test function, but also includes code for
     visualizing the first 5 images with bounding boxes side-by-side.
 
+    Args:
+        args: Command line arguments
+        params: Training parameters from YAML
+        model: Model to evaluate (if None, loads best.pt)
+        is_train: If True, evaluates on training data, otherwise on validation data
+
     Returns: (tp, fp, precision, recall, map50, mean_ap)
     """
-    # Directory to save results
-    results_dir = os.path.join(args.save_path, 'results')
-    os.makedirs(results_dir, exist_ok=True)
+    # Directory to save results (only for validation)
+    results_dir = None
+    if not is_train:
+        results_dir = os.path.join(args.save_path, 'results')
+        os.makedirs(results_dir, exist_ok=True)
 
-    # Read validation files
-    val_filenames = []
-    with open('./Dataset/Yeast/val.txt') as fval:
-        for line in fval.readlines():
-            line = line.rstrip().split('/')[-1]
-            val_filenames.append('./Dataset/Yeast/images/val/' + line)
+    # Read files based on dataset type
+    filenames = []
+    if is_train:
+        # Read training files
+        with open('./Dataset/Yeast/train.txt') as ftrain:
+            for line in ftrain.readlines():
+                line = line.rstrip().split('/')[-1]
+                filenames.append('./Dataset/Yeast/images/train/' + line)
+    else:
+        # Read validation files
+        with open('./Dataset/Yeast/val.txt') as fval:
+            for line in fval.readlines():
+                line = line.rstrip().split('/')[-1]
+                filenames.append('./Dataset/Yeast/images/val/' + line)
 
-    # Build val dataset/loader
-    dataset = Dataset(val_filenames, args.input_size, params, False)
+    # Build dataset/loader
+    dataset = Dataset(filenames, args.input_size, params, False)
     loader = data.DataLoader(
         dataset,
         batch_size=8,      # same as old version (for faster eval)
@@ -409,8 +425,8 @@ def test(args, params, model=None):
             labels = targets[label_mask, 1:]  # (class, x, y, w, h)
             detections = out[i]
 
-            # If we want to visualize, do it for up to 5 images only
-            if vis_count < 5:
+            # If we want to visualize, do it for up to 5 images only (validation only)
+            if not is_train and vis_count < 5 and results_dir is not None:
                 # Format single-sample versions for visualization
                 single_sample = samples[i:i+1]
                 single_out = [detections]  # wrap in list for index usage
@@ -543,7 +559,7 @@ def main():
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--yaml_file', type=str, default='utils/args_yeast.yaml',
                         help='Path to the YAML configuration file')
-    parser.add_argument('--save-path', type=str, default='./results/weights_yeast',
+    parser.add_argument('--save-path', type=str, default='./results/weights_84K_119MB',
                         help='Directory to save model weights and logs')
 
     args = parser.parse_args()

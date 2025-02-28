@@ -8,6 +8,151 @@ import torch
 import torchvision
 from torch.nn.functional import cross_entropy, one_hot
 
+import torch
+from torchsummary import summary
+from contextlib import redirect_stdout
+
+def flatten_model(model):
+    """
+    This function flattens a model into a Sequential-like list of layers
+    while handling custom layers and standard ones.
+    """
+    modules = []
+    
+    # Iterate through all child modules in the model
+    for name, layer in model.named_children():
+        if isinstance(layer, torch.nn.ModuleList) or isinstance(layer, torch.nn.Sequential):
+            # If the layer is a ModuleList or Sequential, recursively flatten it
+            modules.extend(flatten_model(layer))
+        elif isinstance(layer, torch.nn.Conv2d):
+            # If it's a Conv2d, add Conv2d and BatchNorm if exists
+            modules.append(layer)
+            # Check if BatchNorm is attached
+            if hasattr(layer, 'norm'):
+                modules.append(layer.norm)
+            # Check for activation function (e.g., SiLU or ReLU)
+            if hasattr(layer, 'relu'):
+                modules.append(layer.relu)
+        elif isinstance(layer, torch.nn.BatchNorm2d):
+            modules.append(layer)
+        elif isinstance(layer, torch.nn.ReLU) or isinstance(layer, torch.nn.SiLU):
+            modules.append(layer)
+        elif isinstance(layer, torch.nn.MaxPool2d):
+            modules.append(layer)
+        else:
+            # For any other layer, just append it directly
+            modules.append(layer)
+    
+    return modules
+
+class GeneralizedBackboneWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        # Flatten the model
+        modules = flatten_model(model)
+        
+        # Now the backbone is clearly a flat Sequential model of primitive layers
+        self.backbone = torch.nn.Sequential(*modules)
+
+    def forward(self, x):
+        return self.backbone(x)
+    
+    
+
+
+import cv2, os
+import matplotlib.pyplot as plt
+import numpy as np
+def generate_colors(num_classes):
+    """
+    Helper function to generate random colors for each class.
+    Ensures colors are created for all possible class IDs up to num_classes.
+    """
+    np.random.seed(42)  # For consistent colors
+    colors = {}
+    for i in range(num_classes):
+        colors[i] = tuple(np.random.randint(0, 256, 3).tolist())
+    return colors
+
+
+def visualize_predictions(samples, outputs, gt_boxes, shapes, params, class_colors, results_dir, index):
+    """
+    Visualize first 5 images from the val set: draws ground-truth boxes on the
+    left, predicted boxes on the right, and saves side-by-side images.
+    """
+    # Convert single image to CPU numpy
+    img = samples[0].cpu().float().numpy()
+    img = img.transpose((1, 2, 0))  # CHW -> HWC
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    img = (img * 255).astype(np.uint8)
+
+    # Remove padding, resize back
+    original_shape = shapes[0][0]
+    pad_w, pad_h = shapes[0][1][1]
+    h, w = img.shape[:2]
+    img = img[int(pad_h):int(h - pad_h), int(pad_w):int(w - pad_w)]
+    img = cv2.resize(img, (int(original_shape[1]), int(original_shape[0])))
+
+    img_gt = img.copy()
+    img_pred = img.copy()
+
+    # Draw GT
+    for gt in gt_boxes:
+        cls_gt = int(gt[1])
+        coords = gt[2:].cpu().numpy()
+        x_c, y_c = coords[0], coords[1]
+        w_b, h_b = coords[2], coords[3]
+
+        # Convert to corner coordinates
+        x1 = int(x_c - w_b / 2)
+        y1 = int(y_c - h_b / 2)
+        x2 = int(x_c + w_b / 2)
+        y2 = int(y_c + h_b / 2)
+        color = tuple(map(int, class_colors[cls_gt]))
+        cv2.rectangle(img_gt, (x1, y1), (x2, y2), color, 2)
+        if cls_gt in params['names']:
+            cls_name = params['names'][cls_gt]
+        else:
+            cls_name = str(cls_gt)
+        cv2.putText(img_gt, cls_name, (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    # Draw predictions
+    if outputs[0] is not None:
+        
+        # Scale predictions using util.scale like in test function
+        det_clone = outputs[0].clone()
+        scale(det_clone[:, :4], samples[0].shape[1:], shapes[0][0], shapes[0][1])
+        
+        for det in det_clone.cpu().numpy():
+            x1, y1, x2, y2, conf, cls_id = det
+            cls_id = int(cls_id)
+            color = tuple(map(int, class_colors[cls_id]))
+            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+            if cls_id in params['names']:
+                cls_name = params['names'][cls_id]
+            else:
+                cls_name = str(cls_id)
+            cv2.rectangle(img_pred, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(img_pred, f"{cls_name} {conf:.2f}",
+                        (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    # Save side-by-side
+    plt.figure(figsize=(20, 10))
+    plt.subplot(1, 2, 1)
+    plt.imshow(cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB))
+    plt.title('Ground Truth')
+    plt.axis('off')
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(cv2.cvtColor(img_pred, cv2.COLOR_BGR2RGB))
+    plt.title('Predictions')
+    plt.axis('off')
+
+    save_path = os.path.join(results_dir, f'result_{index}.png')
+    plt.savefig(save_path)
+    plt.close()
+
 
 def setup_seed():
     """
