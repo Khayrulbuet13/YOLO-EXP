@@ -15,7 +15,7 @@ from torch.utils import data
 
 
 from nets import pico
-from nets import tinysimo
+from nets import tinysimov2
 from utils import util
 from utils.util import GeneralizedBackboneWrapper, generate_colors, visualize_predictions
 from utils.dataset import Dataset
@@ -24,7 +24,7 @@ from torchsummary import summary
 from contextlib import redirect_stdout
 
 warnings.filterwarnings("ignore")
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 
 def learning_rate(args, params):
@@ -48,35 +48,12 @@ def train(args, params):
         comet_logger = CometLogger(args, params)
     
     num_classes = len(params['names'].values())
-    model = tinysimo.yolo_v8_s(num_classes).cuda()
+    model = tinysimov2.yolo_v8_s(num_classes).cuda()
     
     # Create backbone wrapper and save model summary
     if args.local_rank == 0:
         # Ensure results directory exists
         os.makedirs(args.save_path, exist_ok=True)
-        
-        # # Create a wrapper for the backbone
-        # class BackboneWrapper(torch.nn.Module):
-        #     def __init__(self):
-        #         super().__init__()
-        #         # Create YOLO model and get its backbone
-        #         self.model = model
-        #         self.backbone = self.model.net
-            
-        #     def forward(self, x):
-        #         # Return all feature maps from backbone
-        #         return self.backbone(x)
-        
-        # # Create and move model to GPU
-        # backbone_model = BackboneWrapper().cuda()
-        
-        # # Save model summary to a text file in results directory
-        # from contextlib import redirect_stdout
-        # summary_path = os.path.join(args.save_path, 'model_summary.txt')
-        # with open(summary_path, 'w') as f:
-        #     with redirect_stdout(f):
-        #         from torchsummary import summary
-        #         summary(backbone_model, (3, 640, 640))
         
         # Create a generalized wrapper for any model
         summary_path = os.path.join(args.save_path, 'model_summary.txt')
@@ -132,10 +109,10 @@ def train(args, params):
     # 4) Datasets & DataLoaders
     # -----------------------------------------------
     train_filenames = []
-    with open('./Dataset/Yeast/train.txt') as ftrain:
+    with open('./Dataset/bionano_cell/train.txt') as ftrain:
         for line in ftrain.readlines():
             line = line.rstrip().split('/')[-1]
-            train_filenames.append('./Dataset/Yeast/images/train/' + line)
+            train_filenames.append('./Dataset/bionano_cell/images/train/' + line)
 
     dataset = Dataset(train_filenames, args.input_size, params, True)
     if args.world_size <= 1:
@@ -359,16 +336,16 @@ def test(args, params, model=None, is_train=False):
     filenames = []
     if is_train:
         # Read training files
-        with open('./Dataset/Yeast/train.txt') as ftrain:
+        with open('./Dataset/bionano_cell/train.txt') as ftrain:
             for line in ftrain.readlines():
                 line = line.rstrip().split('/')[-1]
-                filenames.append('./Dataset/Yeast/images/train/' + line)
+                filenames.append('./Dataset/bionano_cell/images/train/' + line)
     else:
         # Read validation files
-        with open('./Dataset/Yeast/val.txt') as fval:
+        with open('./Dataset/bionano_cell/val.txt') as fval:
             for line in fval.readlines():
                 line = line.rstrip().split('/')[-1]
-                filenames.append('./Dataset/Yeast/images/val/' + line)
+                filenames.append('./Dataset/bionano_cell/images/val/' + line)
 
     # Build dataset/loader
     dataset = Dataset(filenames, args.input_size, params, False)
@@ -381,9 +358,18 @@ def test(args, params, model=None, is_train=False):
         collate_fn=Dataset.collate_fn
     )
 
-    # If no model provided, load best
+    # If no model provided, load last (or best if available)
     if model is None:
-        ckpt_path = os.path.join(args.save_path, 'best.pt')
+        best_path = os.path.join(args.save_path, 'best.pt')
+        last_path = os.path.join(args.save_path, 'last.pt')
+        
+        if os.path.exists(best_path):
+            ckpt_path = best_path
+        elif os.path.exists(last_path):
+            ckpt_path = last_path
+        else:
+            raise FileNotFoundError(f"No model found at {best_path} or {last_path}")
+            
         model = torch.load(ckpt_path, map_location='cuda')['model'].float()
 
     model.half()
@@ -438,7 +424,14 @@ def test(args, params, model=None, is_train=False):
                     # Scale coordinates back to original image size
                     gt_boxes = labels.clone()
                     h0, w0 = shapes[i][0]  # Original height, width
-                    gt_boxes[:, 1:] *= torch.tensor([w0/w, h0/h, w0/w, h0/h], device=gt_boxes.device)
+                    # Don't scale the class ID, only scale the coordinates
+                    # Create a separate tensor for class ID
+                    class_ids = gt_boxes[:, 0].clone()
+                    # Scale only the coordinates
+                    coords = gt_boxes[:, 1:] * torch.tensor([w0/w, h0/h, w0/w, h0/h], device=gt_boxes.device)
+                    # Recombine
+                    gt_boxes = torch.cat([class_ids.unsqueeze(1), coords], dim=1)
+                    
                     for gt in gt_boxes:
                         single_gt.append(torch.tensor([0, gt[0], gt[1], gt[2], gt[3], gt[4]], device=gt.device))
                     single_gt = torch.stack(single_gt)
@@ -557,9 +550,9 @@ def main():
     parser.add_argument('--epochs', default=500, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
-    parser.add_argument('--yaml_file', type=str, default='utils/args_yeast.yaml',
+    parser.add_argument('--yaml_file', type=str, default='utils/args_bionano.yaml',
                         help='Path to the YAML configuration file')
-    parser.add_argument('--save-path', type=str, default='./results/weights_84K_119MB',
+    parser.add_argument('--save-path', type=str, default='./results/weights_bn_84K_36MB',
                         help='Directory to save model weights and logs')
 
     args = parser.parse_args()
