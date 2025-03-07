@@ -258,8 +258,8 @@ def yolo_v8_s(num_classes: int = 20):
     # Example: 3 stages, with 1,2,2 repeated conv blocks
     # widths = [3(input), 32, 64, 128, 256]
     # depths = [1, 2, 2]
-    widths = [3, 4, 8, 16,  64, 128]
-    depths = [1, 1, 1, 1, 1]
+    widths = [3, 16,  64, 128]
+    depths = [1, 1, 1, 1]
     return YOLO(widths, depths, num_classes)
 
 def yolo_v8_es(num_classes: int = 20):
@@ -294,6 +294,18 @@ def yolo_v8_l(num_classes: int = 20):
     # Note that we gave one extra channel stage here to illustrate flexibility.
     # You can adapt as needed.
     widths = [3, 64, 128, 256, 512, 512]
+    depths = [3, 6, 6]
+    return YOLO(widths, depths, num_classes)
+
+def yolo_v8_bn(num_classes: int = 20):
+    """
+    Large version
+    """
+    # Example: 3 stages, with 3,6,6 repeated conv blocks
+    # widths = [3, 64, 128, 256, 512, 512]
+    # Note that we gave one extra channel stage here to illustrate flexibility.
+    # You can adapt as needed.
+    widths = [3, 64, 128]
     depths = [3, 6, 6]
     return YOLO(widths, depths, num_classes)
 

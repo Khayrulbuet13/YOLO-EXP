@@ -15,6 +15,7 @@ from torch.utils import data
 
 
 from nets import pico
+from nets import darknet
 from nets import tinysimov2
 from utils import util
 from utils.util import GeneralizedBackboneWrapper, generate_colors, visualize_predictions
@@ -109,10 +110,10 @@ def train(args, params):
     # 4) Datasets & DataLoaders
     # -----------------------------------------------
     train_filenames = []
-    with open('./Dataset/bionano_cell/train.txt') as ftrain:
+    with open(os.path.join(args.dataset_dir, 'train.txt')) as ftrain:
         for line in ftrain.readlines():
             line = line.rstrip().split('/')[-1]
-            train_filenames.append('./Dataset/bionano_cell/images/train/' + line)
+            train_filenames.append(os.path.join(args.dataset_dir, 'images/train', line))
 
     dataset = Dataset(train_filenames, args.input_size, params, True)
     if args.world_size <= 1:
@@ -336,16 +337,16 @@ def test(args, params, model=None, is_train=False):
     filenames = []
     if is_train:
         # Read training files
-        with open('./Dataset/bionano_cell/train.txt') as ftrain:
+        with open(os.path.join(args.dataset_dir, 'train.txt')) as ftrain:
             for line in ftrain.readlines():
                 line = line.rstrip().split('/')[-1]
-                filenames.append('./Dataset/bionano_cell/images/train/' + line)
+                filenames.append(os.path.join(args.dataset_dir, 'images/train', line))
     else:
         # Read validation files
-        with open('./Dataset/bionano_cell/val.txt') as fval:
+        with open(os.path.join(args.dataset_dir, 'val.txt')) as fval:
             for line in fval.readlines():
                 line = line.rstrip().split('/')[-1]
-                filenames.append('./Dataset/bionano_cell/images/val/' + line)
+                filenames.append(os.path.join(args.dataset_dir, 'images/val', line))
 
     # Build dataset/loader
     dataset = Dataset(filenames, args.input_size, params, False)
@@ -424,11 +425,23 @@ def test(args, params, model=None, is_train=False):
                     # Scale coordinates back to original image size
                     gt_boxes = labels.clone()
                     h0, w0 = shapes[i][0]  # Original height, width
-                    # Don't scale the class ID, only scale the coordinates
-                    # Create a separate tensor for class ID
+                    pad_w, pad_h = shapes[i][1][1]  # Get padding values
+                    
                     class_ids = gt_boxes[:, 0].clone()
-                    # Scale only the coordinates
-                    coords = gt_boxes[:, 1:] * torch.tensor([w0/w, h0/h, w0/w, h0/h], device=gt_boxes.device)
+                    # Calculate scaled dimensions after removing padding
+                    scaled_w = w - 2 * pad_w
+                    scaled_h = h - 2 * pad_h
+
+                    # Compute scaling factors
+                    scale_x = w0 / scaled_w
+                    scale_y = h0 / scaled_h
+
+                    # Adjust coordinates
+                    coords = gt_boxes[:, 1:].clone()
+                    coords[:, 0] = (coords[:, 0] - pad_w) * scale_x  # x_center
+                    coords[:, 1] = (coords[:, 1] - pad_h) * scale_y  # y_center
+                    coords[:, 2] *= scale_x  # width
+                    coords[:, 3] *= scale_y  # height
                     # Recombine
                     gt_boxes = torch.cat([class_ids.unsqueeze(1), coords], dim=1)
                     
@@ -554,6 +567,8 @@ def main():
                         help='Path to the YAML configuration file')
     parser.add_argument('--save-path', type=str, default='./results/weights_bn_84K_36MB',
                         help='Directory to save model weights and logs')
+    parser.add_argument('--dataset-dir', type=str, default='./Dataset/bionano_cell',
+                        help='Path to the dataset directory')
 
     args = parser.parse_args()
 
