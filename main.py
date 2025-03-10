@@ -49,7 +49,9 @@ def train(args, params):
         comet_logger = CometLogger(args, params)
     
     num_classes = len(params['names'].values())
-    model = tinysimov2.yolo_v8_s(num_classes).cuda()
+    print(f"DEBUG: Creating model with num_classes = {num_classes}, input_size = {args.input_size}")
+    model = tinysimov2.yolo_v8_xl(num_classes, input_size=args.input_size).cuda()
+    print(f"DEBUG: Model created successfully")
     
     # Create backbone wrapper and save model summary
     if args.local_rank == 0:
@@ -59,12 +61,28 @@ def train(args, params):
         # Create a generalized wrapper for any model
         summary_path = os.path.join(args.save_path, 'model_summary.txt')
         generalized_model = GeneralizedBackboneWrapper(model.net).cuda()
+        print(f"DEBUG: Created GeneralizedBackboneWrapper for model.net")
 
         # Save model summary to a text file
         with open(summary_path, 'w') as f:
             with redirect_stdout(f):
-                summary(generalized_model, (3, 640, 640))
-        
+                # Handle both single value and tuple input sizes
+                if isinstance(args.input_size, tuple):
+                    input_shape = (3, args.input_size[0], args.input_size[1])
+                    print(f"DEBUG: Using tuple input_shape = {input_shape}")
+                else:
+                    input_shape = (3, args.input_size, args.input_size)
+                    print(f"DEBUG: Using square input_shape = {input_shape}")
+                
+                print(f"DEBUG: About to call summary with input_shape = {input_shape}")
+                summary(generalized_model, input_shape)
+                
+                # Direct check of model output shape
+                print("\nDEBUG: Direct check of model output shape:")
+                dummy_input = torch.zeros(1, *input_shape).cuda()
+                with torch.no_grad():
+                    output = model.net(dummy_input)
+                print(f"DEBUG: Model net output shape with input {input_shape}: {output.shape}")
         print(f"Model summary saved to {summary_path}")
         
         # Log source code from nets/ directory
@@ -116,6 +134,7 @@ def train(args, params):
             train_filenames.append(os.path.join(args.dataset_dir, 'images/train', line))
 
     dataset = Dataset(train_filenames, args.input_size, params, True)
+    print(f"DEBUG: Loaded image shape: {dataset[0][0].shape}")
     if args.world_size <= 1:
         sampler = None
     else:
@@ -555,9 +574,23 @@ def test(args, params, model=None, is_train=False):
     return (tp, fp, m_pre, m_rec, map50, mean_ap)
 
 
+def parse_input_size(size_str):
+    """
+    Parse input size string to either a single integer or a tuple of two integers.
+    Examples:
+        '640' -> 640
+        '640,320' -> (640, 320)
+    """
+    if ',' in size_str:
+        h, w = map(int, size_str.split(','))
+        return (h, w)
+    else:
+        return int(size_str)
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input-size', default=640, type=int)
+    parser.add_argument('--input-size', default='640', type=str,
+                        help='Input size as single value (e.g., 640) or height,width (e.g., 640,320)')
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--local_rank', '--local-rank', default=0, type=int)
     parser.add_argument('--epochs', default=500, type=int)
@@ -572,6 +605,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Parse input size
+    args.input_size = parse_input_size(args.input_size)
+    print(f"DEBUG: Parsed input_size = {args.input_size}")
+    
     args.local_rank = int(os.getenv('LOCAL_RANK', '0'))
     args.world_size = int(os.getenv('WORLD_SIZE', '1'))
 
@@ -583,6 +620,8 @@ def main():
     if args.local_rank == 0:
         if not os.path.exists(args.save_path):
             os.makedirs(args.save_path)
+        
+        print(f"DEBUG: Save path: {args.save_path}")
 
     util.setup_seed()
     util.setup_multi_processes()
@@ -591,8 +630,10 @@ def main():
         params = yaml.safe_load(f)
 
     if args.train:
+        print(f"DEBUG: Starting training with input_size = {args.input_size}")
         train(args, params)
     if args.test:
+        print(f"DEBUG: Starting testing with input_size = {args.input_size}")
         test(args, params)
 
 

@@ -58,71 +58,6 @@ class Conv(torch.nn.Module):
         return self.relu(self.conv(x))
 
 
-# class DarkNet(torch.nn.Module):
-#     """
-#     A 'backbone' that can be hard-coded (original YOLO code)
-#     OR built from `widths` and `depths` if provided.
-#     """
-#     def __init__(self, widths=None, depths=None):
-#         super().__init__()
-
-
-#         layers = []
-#         in_ch = widths[0]  # typically 3 for RGB
-#         stage_count = min(len(depths), len(widths) - 1)
-
-#         for i in range(stage_count):
-#             out_ch = widths[i + 1]
-#             nblocks = depths[i]
-#             # repeat nblocks times: Conv(in_ch -> out_ch)
-#             for _ in range(nblocks):
-#                 layers.append(Conv(in_ch, out_ch, 3, 1))
-#                 in_ch = out_ch
-#             # Add a downsample
-#             layers.append(torch.nn.MaxPool2d(2, 2))
-
-#         self.backbone = torch.nn.ModuleList(layers)
-#         self.out_channels = in_ch  # last conv out_ch
-
-#     def forward(self, x):
-#         for layer in self.backbone:
-#             x = layer(x)
-#         return x
-
-# class DarkNet(torch.nn.Module):
-#     """
-#     A 'backbone' that can be hard-coded (original YOLO code)
-#     OR built from `widths` and `depths` if provided.
-#     """
-#     def __init__(self, widths=None, depths=None):
-#         super().__init__()
-
-#         layers = []
-#         in_ch = widths[0]  # typically 3 for RGB
-#         stage_count = min(len(depths), len(widths) - 1)
-
-#         for i in range(stage_count):
-#             out_ch = widths[i + 1]
-#             nblocks = depths[i]
-
-#             # Apply nblocks-1 Conv layers with stride=1
-#             for j in range(nblocks - 1):
-#                 layers.append(Conv(in_ch, out_ch, 3, 1))  # Keep stride=1 for the blocks
-#                 in_ch = out_ch  # Update in_ch for the next block
-
-#             # After the last block, apply downsampling (stride=2)
-#             if i < stage_count - 1:  # Only apply downsampling between stages
-#                 layers.append(Conv(in_ch, out_ch, 3, 2))  # stride=2 for downsampling
-#                 in_ch = out_ch  # Update in_ch after downsampling
-
-#         self.backbone = torch.nn.ModuleList(layers)
-#         self.out_channels = in_ch  # last conv out_ch
-
-#     def forward(self, x):
-#         for layer in self.backbone:
-#             x = layer(x)
-#         return x
-
 
 class DarkNet(torch.nn.Module):
     """
@@ -152,6 +87,7 @@ class DarkNet(torch.nn.Module):
     def forward(self, x):
         for layer in self.backbone:
             x = layer(x)
+            # print("Feature map shape:", x.shape) 
         return x
 
 
@@ -203,25 +139,50 @@ class Head(torch.nn.Module):
         b = self.cls
         s = self.stride[0]
         a.bias.data[:] = 1.0
-        b.bias.data[:self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
+        # Use input size from model initialization instead of hardcoded 640
+        input_size = math.sqrt(self.stride[0] * a.weight.shape[-1] * a.weight.shape[-2])
+        b.bias.data[:self.nc] = math.log(5 / self.nc / (input_size / s) ** 2)
 
 
 class YOLO(torch.nn.Module):
-    def __init__(self, widths=None, depths=None, num_classes=20):
+    def __init__(self, widths=None, depths=None, num_classes=20, input_size=None):
         """
         If widths/depths are None, use the original architecture (DarkNet hard-coded).
         Otherwise, build custom backbone from widths/depths.
+        
+        input_size: Optional tuple (height, width) to use for stride calculation
+                   If None, will use default values
         """
         super().__init__()
         self.net = DarkNet(widths, depths)
         self.head = Head(num_classes, ch_in=self.net.out_channels)
 
-        # Initialize strides
-        img_dummy = torch.zeros(1, 3, 256, 256)
-        self.head.stride = torch.tensor([256 / x.shape[-2] for x in [self.forward(img_dummy)[0]]])
+        # Initialize strides with a dummy image
+        # Use the provided input_size if available, otherwise use defaults
+        if input_size is not None and isinstance(input_size, (tuple, list)) and len(input_size) == 2:
+            dummy_h, dummy_w = input_size
+        else:
+            # Default to square image to match v1 behavior
+            dummy_h, dummy_w = 256, 256
+            
+        # Create a dummy input with the correct shape
+        img_dummy = torch.zeros(1, 3, dummy_h, dummy_w)
+        
+        # Forward pass to get feature map size
+        feature_maps = self.forward(img_dummy)[0]
+        
+        # Calculate stride using both dimensions
+        stride_h = dummy_h / feature_maps.shape[-2]
+        stride_w = dummy_w / feature_maps.shape[-1]
+        # Maintain separate stride values for height and width
+        stride = torch.tensor([stride_h, stride_w], device=feature_maps.device)
+        
+        
+        # Store separate H/W stride tensors
+        self.head.stride = torch.tensor([stride_h, stride_w], dtype=torch.float, device=feature_maps.device)
         self.stride = self.head.stride
         self.head.initialize_biases()
-
+        
     def forward(self, x):
         x = self.net(x)
         return self.head(x)
@@ -234,60 +195,83 @@ class YOLO(torch.nn.Module):
                 delattr(m, 'norm')
         return self
 
+    # Rest of the YOLO class remains unchanged
 
 # -----------------------------------------------------------------------------------
 # OLD constructor renamed to "yolo_v8_xl" to reflect that it is your existing "XL" model
 # -----------------------------------------------------------------------------------
-def yolo_v8_xl(num_classes: int = 20):
+def yolo_v8_xl(num_classes: int = 20, input_size=None):
     """
     This returns the original YOLO model exactly as before (the "XL" version).
+    
+    Args:
+        num_classes: Number of classes to detect
+        input_size: Optional tuple (height, width) to use for model initialization
     """
     widths =  [3, 16, 32, 64, 128]
     depths = [3, 2, 3, 2]
-    return YOLO(widths, depths, num_classes)
+    return YOLO(widths, depths, num_classes, input_size)
 
 
 # -----------------------------------------------------------------------------------
 # Example custom constructors for YOLOv8 "S", "M", and "L" with widths/depths arrays
 # You can tweak these arrays any way you like.
 # -----------------------------------------------------------------------------------
-def yolo_v8_s(num_classes: int = 20):
+def yolo_v8_s(num_classes: int = 20, input_size=None):
     """
     Small version: fewer channels, fewer repeated blocks
+    
+    Args:
+        num_classes: Number of classes to detect
+        input_size: Optional tuple (height, width) to use for model initialization
     """
     # Example: 3 stages, with 1,2,2 repeated conv blocks
     # widths = [3(input), 32, 64, 128, 256]
     # depths = [1, 2, 2]
     widths = [3, 16,  64, 128]
     depths = [1, 1, 1, 1]
-    return YOLO(widths, depths, num_classes)
+    
+    
+    return YOLO(widths, depths, num_classes, input_size)
 
-def yolo_v8_es(num_classes: int = 20):
+def yolo_v8_es(num_classes: int = 20, input_size=None):
     """
     Small version: fewer channels, fewer repeated blocks
+    
+    Args:
+        num_classes: Number of classes to detect
+        input_size: Optional tuple (height, width) to use for model initialization
     """
     # Example: 3 stages, with 1,2,2 repeated conv blocks
     # widths = [3(input), 32, 64, 128, 256]
     # depths = [1, 2, 2]
     widths = [3, 4, 8, 16, 32, 64]
     depths = [1, 1, 1, 1, 1]
-    return YOLO(widths, depths, num_classes)
+    return YOLO(widths, depths, num_classes, input_size)
 
-def yolo_v8_m(num_classes: int = 20):
+def yolo_v8_m(num_classes: int = 20, input_size=None):
     """
     Medium version
+    
+    Args:
+        num_classes: Number of classes to detect
+        input_size: Optional tuple (height, width) to use for model initialization
     """
     # Example: 3 stages, with 2,4,4 repeated conv blocks
     # widths = [3, 48, 96, 192, 384]
     # depths = [2, 4, 4]
     widths = [3, 16, 32, 128, 256]
     depths = [1, 1, 1, 1]
-    return YOLO(widths, depths, num_classes)
+    return YOLO(widths, depths, num_classes, input_size)
 
 
-def yolo_v8_l(num_classes: int = 20):
+def yolo_v8_l(num_classes: int = 20, input_size=None):
     """
     Large version
+    
+    Args:
+        num_classes: Number of classes to detect
+        input_size: Optional tuple (height, width) to use for model initialization
     """
     # Example: 3 stages, with 3,6,6 repeated conv blocks
     # widths = [3, 64, 128, 256, 512, 512]
@@ -295,11 +279,15 @@ def yolo_v8_l(num_classes: int = 20):
     # You can adapt as needed.
     widths = [3, 64, 128, 256, 512, 512]
     depths = [3, 6, 6]
-    return YOLO(widths, depths, num_classes)
+    return YOLO(widths, depths, num_classes, input_size)
 
-def yolo_v8_bn(num_classes: int = 20):
+def yolo_v8_bn(num_classes: int = 20, input_size=None):
     """
     Large version
+    
+    Args:
+        num_classes: Number of classes to detect
+        input_size: Optional tuple (height, width) to use for model initialization
     """
     # Example: 3 stages, with 3,6,6 repeated conv blocks
     # widths = [3, 64, 128, 256, 512, 512]
@@ -307,5 +295,4 @@ def yolo_v8_bn(num_classes: int = 20):
     # You can adapt as needed.
     widths = [3, 64, 128]
     depths = [3, 6, 6]
-    return YOLO(widths, depths, num_classes)
-
+    return YOLO(widths, depths, num_classes, input_size)

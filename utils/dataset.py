@@ -96,86 +96,416 @@ class Dataset(data.Dataset):
         return len(self.filenames)
 
     def load_image(self, i):
+        # Load original image without resizing
         image = cv2.imread(self.filenames[i])
-        h, w = image.shape[:2]
-        r = self.input_size / max(h, w)
-        if r != 1:
-            image = cv2.resize(image,
-                               dsize=(int(w * r), int(h * r)),
-                               interpolation=resample() if self.augment else cv2.INTER_LINEAR)
-        return image, (h, w)
+        return image, image.shape[:2]
+
+    # def load_mosaic(self, index, params):
+    #     label4 = []
+    #     if isinstance(self.input_size, tuple):
+    #         target_h, target_w = self.input_size
+    #         mosaic_h, mosaic_w = 2 * target_h, 2 * target_w
+    #         border = (-target_h // 2, -target_w // 2)
+    #     else:
+    #         mosaic_h = mosaic_w = 2 * self.input_size
+    #         border = [-self.input_size // 2, -self.input_size // 2]
+
+    #     image4 = numpy.full((mosaic_h, mosaic_w, 3), 0, dtype=numpy.uint8)
+    #     xc = int(random.uniform(-border[0], mosaic_w + border[1]))
+    #     yc = int(random.uniform(-border[0], mosaic_h + border[1]))
+    #     indices = [index] + random.choices(self.indices, k=3)
+    #     random.shuffle(indices)
+
+    #     for i, index in enumerate(indices):
+    #         # Load and resize image to target size
+    #         image, _ = self.load_image(index)
+    #         image, _, _ = resize(image, self.input_size, self.augment)
+    #         h, w = image.shape[:2]
+
+    #         # Position the image in the mosaic
+    #         if i == 0:  # top left
+    #             x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+    #             x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+    #         elif i == 1:  # top right
+    #             x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, mosaic_w), yc
+    #             x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+    #         elif i == 2:  # bottom left
+    #             x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(mosaic_h, yc + h)
+    #             x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
+    #         elif i == 3:  # bottom right
+    #             x1a, y1a, x2a, y2a = xc, yc, min(xc + w, mosaic_w), min(mosaic_h, yc + h)
+    #             x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+
+    #         image4[y1a:y2a, x1a:x2a] = image[y1b:y2b, x1b:x2b]
+    #         padw = x1a - x1b
+    #         padh = y1a - y1b
+
+    #         # Labels
+    #         label = self.labels[index].copy()
+    #         if label.size:
+    #             label[:, 1:] = wh2xy(label[:, 1:], w, h, padw, padh)
+    #         label4.append(label)
+
+    #     # Concat/clip labels
+    #     label4 = numpy.concatenate(label4, 0)
+    #     label4[:, 1:] = numpy.clip(label4[:, 1:], 0, mosaic_w if isinstance(self.input_size, tuple) else 2 * self.input_size)
+
+    #     # Augment
+    #     image4, label4 = random_perspective(image4, label4, params, border)
+
+    #     # Resize mosaic to input_size
+    #     image4, ratio, pad = resize(image4, self.input_size, self.augment)
+    #     if label4.size:
+    #         label4[:, 1:] = wh2xy(label4[:, 1:], image4.shape[1], image4.shape[0], pad[0], pad[1])
+
+    #     return image4, label4
+
+
+
 
     def load_mosaic(self, index, params):
         label4 = []
-        image4 = numpy.full((self.input_size * 2, self.input_size * 2, 3), 0, dtype=numpy.uint8)
-        y1a, y2a, x1a, x2a, y1b, y2b, x1b, x2b = (None, None, None, None, None, None, None, None)
+        if isinstance(self.input_size, tuple):
+            target_h, target_w = self.input_size
+            mosaic_h, mosaic_w = 2 * target_h, 2 * target_w
+            # Separate border values for height and width
+            border_h = -target_h // 2
+            border_w = -target_w // 2
+        else:
+            mosaic_h = mosaic_w = 2 * self.input_size
+            border_h = border_w = -self.input_size // 2
 
-        border = [-self.input_size // 2, -self.input_size // 2]
-
-        xc = int(random.uniform(-border[0], 2 * self.input_size + border[1]))
-        yc = int(random.uniform(-border[0], 2 * self.input_size + border[1]))
-
+        image4 = numpy.full((mosaic_h, mosaic_w, 3), 0, dtype=numpy.uint8)
+        
+        # Corrected: Use width border for xc and height border for yc
+        xc = int(random.uniform(-border_w, mosaic_w + border_w))
+        yc = int(random.uniform(-border_h, mosaic_h + border_h))
+        
         indices = [index] + random.choices(self.indices, k=3)
         random.shuffle(indices)
 
         for i, index in enumerate(indices):
-            # Load image
+            # Load and resize image to target size
             image, _ = self.load_image(index)
-            shape = image.shape
-            if i == 0:  # top left
-                x1a = max(xc - shape[1], 0)
-                y1a = max(yc - shape[0], 0)
-                x2a = xc
-                y2a = yc
-                x1b = shape[1] - (x2a - x1a)
-                y1b = shape[0] - (y2a - y1a)
-                x2b = shape[1]
-                y2b = shape[0]
-            if i == 1:  # top right
-                x1a = xc
-                y1a = max(yc - shape[0], 0)
-                x2a = min(xc + shape[1], self.input_size * 2)
-                y2a = yc
-                x1b = 0
-                y1b = shape[0] - (y2a - y1a)
-                x2b = min(shape[1], x2a - x1a)
-                y2b = shape[0]
-            if i == 2:  # bottom left
-                x1a = max(xc - shape[1], 0)
-                y1a = yc
-                x2a = xc
-                y2a = min(self.input_size * 2, yc + shape[0])
-                x1b = shape[1] - (x2a - x1a)
-                y1b = 0
-                x2b = shape[1]
-                y2b = min(y2a - y1a, shape[0])
-            if i == 3:  # bottom right
-                x1a = xc
-                y1a = yc
-                x2a = min(xc + shape[1], self.input_size * 2)
-                y2a = min(self.input_size * 2, yc + shape[0])
-                x1b = 0
-                y1b = 0
-                x2b = min(shape[1], x2a - x1a)
-                y2b = min(y2a - y1a, shape[0])
+            image, _, _ = resize(image, self.input_size, self.augment)
+            h, w = image.shape[:2]  # h=target_h, w=target_w after resize
 
-            image4[y1a:y2a, x1a:x2a] = image[y1b:y2b, x1b:x2b]
-            pad_w = x1a - x1b
-            pad_h = y1a - y1b
+            # Position the image in the mosaic
+            if i == 0:  # top left
+                x1a = max(xc - w, 0)
+                y1a = max(yc - h, 0)
+                x2a = xc
+                y2a = yc
+                x1b = w - (x2a - x1a)
+                y1b = h - (y2a - y1a)
+                x2b = w
+                y2b = h
+            elif i == 1:  # top right
+                x1a = xc
+                y1a = max(yc - h, 0)
+                x2a = min(xc + w, mosaic_w)
+                y2a = yc
+                x1b = 0
+                y1b = h - (y2a - y1a)
+                x2b = min(w, x2a - x1a)
+                y2b = h
+            elif i == 2:  # bottom left
+                x1a = max(xc - w, 0)
+                y1a = yc
+                x2a = xc
+                y2a = min(mosaic_h, yc + h)
+                x1b = w - (x2a - x1a)
+                y1b = 0
+                x2b = w
+                y2b = min(y2a - y1a, h)
+            elif i == 3:  # bottom right
+                x1a = xc
+                y1a = yc
+                x2a = min(xc + w, mosaic_w)
+                y2a = min(mosaic_h, yc + h)
+                x1b = 0
+                y1b = 0
+                x2b = min(w, x2a - x1a)
+                y2b = min(y2a - y1a, h)
+
+            # Ensure valid region before slicing
+            if y2a > y1a and x2a > x1a:
+                image4[y1a:y2a, x1a:x2a] = image[y1b:y2b, x1b:x2b]
+            else:
+                continue  # Skip invalid placements
+
+            padw = x1a - x1b
+            padh = y1a - y1b
 
             # Labels
             label = self.labels[index].copy()
-            if len(label):
-                label[:, 1:] = wh2xy(label[:, 1:], shape[1], shape[0], pad_w, pad_h)
+            if label.size:
+                label[:, 1:] = wh2xy(label[:, 1:], w, h, padw, padh)
             label4.append(label)
 
         # Concat/clip labels
-        label4 = numpy.concatenate(label4, 0)
-        for x in label4[:, 1:]:
-            numpy.clip(x, 0, 2 * self.input_size, out=x)
+        label4 = numpy.concatenate(label4, 0) if label4 else numpy.zeros((0, 5), dtype=numpy.float32)
+        # Clip labels to mosaic dimensions
+        label4[:, 1::2] = numpy.clip(label4[:, 1::2], 0, mosaic_w)  # x coordinates
+        label4[:, 2::2] = numpy.clip(label4[:, 2::2], 0, mosaic_h)  # y coordinates
+import math
+import os
+import random
+
+import cv2
+import numpy
+import torch
+from PIL import Image
+from torch.utils import data
+
+FORMATS = 'bmp', 'dng', 'jpeg', 'jpg', 'mpo', 'png', 'tif', 'tiff', 'webp'
+
+
+class Dataset(data.Dataset):
+    def __init__(self, filenames, input_size, params, augment):
+        self.params = params
+        self.mosaic = augment
+        self.augment = augment
+        self.input_size = input_size
+        self.num_classes = len(params['names'])
+
+        # Read labels
+        cache = self.load_label(filenames)
+        labels, shapes = zip(*cache.values())
+        self.labels = list(labels)
+        self.shapes = numpy.array(shapes, dtype=numpy.float64)
+        self.filenames = list(cache.keys())  # update
+        self.n = len(shapes)  # number of samples
+        self.indices = range(self.n)
+        # Albumentations (optional, only used if package is installed)
+        self.albumentations = Albumentations()
+
+    def __getitem__(self, index):
+        index = self.indices[index]
+
+        params = self.params
+        mosaic = self.mosaic and random.random() < params['mosaic']
+
+        if mosaic:
+            shapes = None
+            # Load MOSAIC
+            image, label = self.load_mosaic(index, params)
+            # MixUp augmentation
+            if random.random() < params['mix_up']:
+                index = random.choice(self.indices)
+                mix_image1, mix_label1 = image, label
+                mix_image2, mix_label2 = self.load_mosaic(index, params)
+
+                image, label = mix_up(mix_image1, mix_label1, mix_image2, mix_label2)
+        else:
+            # Load image
+            image, shape = self.load_image(index)
+            h, w = image.shape[:2]
+
+            # Resize
+            image, ratio, pad = resize(image, self.input_size, self.augment)
+            shapes = shape, ((h / shape[0], w / shape[1]), pad)  # for COCO mAP rescaling
+
+            label = self.labels[index].copy()
+            if label.size:
+                label[:, 1:] = wh2xy(label[:, 1:], ratio[0] * w, ratio[1] * h, pad[0], pad[1])
+            if self.augment:
+                image, label = random_perspective(image, label, params)
+        nl = len(label)  # number of labels
+        if nl:
+            label[:, 1:5] = xy2wh(label[:, 1:5], image.shape[1], image.shape[0])
+
+        if self.augment:
+            # Albumentations
+            image, label = self.albumentations(image, label)
+            nl = len(label)  # update after albumentations
+            # HSV color-space
+            augment_hsv(image, params)
+            # Flip up-down
+            if random.random() < params['flip_ud']:
+                image = numpy.flipud(image)
+                if nl:
+                    label[:, 2] = 1 - label[:, 2]
+            # Flip left-right
+            if random.random() < params['flip_lr']:
+                image = numpy.fliplr(image)
+                if nl:
+                    label[:, 1] = 1 - label[:, 1]
+
+        target = torch.zeros((nl, 6))
+        if nl:
+            target[:, 1:] = torch.from_numpy(label)
+
+        # Convert HWC to CHW, BGR to RGB
+        sample = image.transpose((2, 0, 1))[::-1]
+        sample = numpy.ascontiguousarray(sample)
+
+        return torch.from_numpy(sample), target, shapes
+
+    def __len__(self):
+        return len(self.filenames)
+
+    def load_image(self, i):
+        # Load original image without resizing
+        image = cv2.imread(self.filenames[i])
+        return image, image.shape[:2]
+
+    # def load_mosaic(self, index, params):
+    #     label4 = []
+    #     if isinstance(self.input_size, tuple):
+    #         target_h, target_w = self.input_size
+    #         mosaic_h, mosaic_w = 2 * target_h, 2 * target_w
+    #         border = (-target_h // 2, -target_w // 2)
+    #     else:
+    #         mosaic_h = mosaic_w = 2 * self.input_size
+    #         border = [-self.input_size // 2, -self.input_size // 2]
+
+    #     image4 = numpy.full((mosaic_h, mosaic_w, 3), 0, dtype=numpy.uint8)
+    #     xc = int(random.uniform(-border[0], mosaic_w + border[1]))
+    #     yc = int(random.uniform(-border[0], mosaic_h + border[1]))
+    #     indices = [index] + random.choices(self.indices, k=3)
+    #     random.shuffle(indices)
+
+    #     for i, index in enumerate(indices):
+    #         # Load and resize image to target size
+    #         image, _ = self.load_image(index)
+    #         image, _, _ = resize(image, self.input_size, self.augment)
+    #         h, w = image.shape[:2]
+
+    #         # Position the image in the mosaic
+    #         if i == 0:  # top left
+    #             x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+    #             x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+    #         elif i == 1:  # top right
+    #             x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, mosaic_w), yc
+    #             x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+    #         elif i == 2:  # bottom left
+    #             x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(mosaic_h, yc + h)
+    #             x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
+    #         elif i == 3:  # bottom right
+    #             x1a, y1a, x2a, y2a = xc, yc, min(xc + w, mosaic_w), min(mosaic_h, yc + h)
+    #             x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+
+    #         image4[y1a:y2a, x1a:x2a] = image[y1b:y2b, x1b:x2b]
+    #         padw = x1a - x1b
+    #         padh = y1a - y1b
+
+    #         # Labels
+    #         label = self.labels[index].copy()
+    #         if label.size:
+    #             label[:, 1:] = wh2xy(label[:, 1:], w, h, padw, padh)
+    #         label4.append(label)
+
+    #     # Concat/clip labels
+    #     label4 = numpy.concatenate(label4, 0)
+    #     label4[:, 1:] = numpy.clip(label4[:, 1:], 0, mosaic_w if isinstance(self.input_size, tuple) else 2 * self.input_size)
+
+    #     # Augment
+    #     image4, label4 = random_perspective(image4, label4, params, border)
+
+    #     # Resize mosaic to input_size
+    #     image4, ratio, pad = resize(image4, self.input_size, self.augment)
+    #     if label4.size:
+    #         label4[:, 1:] = wh2xy(label4[:, 1:], image4.shape[1], image4.shape[0], pad[0], pad[1])
+
+    #     return image4, label4
+
+
+
+
+    def load_mosaic(self, index, params):
+        label4 = []
+        if isinstance(self.input_size, tuple):
+            target_h, target_w = self.input_size
+            mosaic_h, mosaic_w = 2 * target_h, 2 * target_w
+            # Separate border values for height and width
+            border_h = -target_h // 2
+            border_w = -target_w // 2
+        else:
+            mosaic_h = mosaic_w = 2 * self.input_size
+            border_h = border_w = -self.input_size // 2
+
+        image4 = numpy.full((mosaic_h, mosaic_w, 3), 0, dtype=numpy.uint8)
+        
+        # Corrected: Use width border for xc and height border for yc
+        xc = int(random.uniform(-border_w, mosaic_w + border_w))
+        yc = int(random.uniform(-border_h, mosaic_h + border_h))
+        
+        indices = [index] + random.choices(self.indices, k=3)
+        random.shuffle(indices)
+
+        for i, index in enumerate(indices):
+            # Load and resize image to target size
+            image, _ = self.load_image(index)
+            image, _, _ = resize(image, self.input_size, self.augment)
+            h, w = image.shape[:2]  # h=target_h, w=target_w after resize
+
+            # Position the image in the mosaic
+            if i == 0:  # top left
+                x1a = max(xc - w, 0)
+                y1a = max(yc - h, 0)
+                x2a = xc
+                y2a = yc
+                x1b = w - (x2a - x1a)
+                y1b = h - (y2a - y1a)
+                x2b = w
+                y2b = h
+            elif i == 1:  # top right
+                x1a = xc
+                y1a = max(yc - h, 0)
+                x2a = min(xc + w, mosaic_w)
+                y2a = yc
+                x1b = 0
+                y1b = h - (y2a - y1a)
+                x2b = min(w, x2a - x1a)
+                y2b = h
+            elif i == 2:  # bottom left
+                x1a = max(xc - w, 0)
+                y1a = yc
+                x2a = xc
+                y2a = min(mosaic_h, yc + h)
+                x1b = w - (x2a - x1a)
+                y1b = 0
+                x2b = w
+                y2b = min(y2a - y1a, h)
+            elif i == 3:  # bottom right
+                x1a = xc
+                y1a = yc
+                x2a = min(xc + w, mosaic_w)
+                y2a = min(mosaic_h, yc + h)
+                x1b = 0
+                y1b = 0
+                x2b = min(w, x2a - x1a)
+                y2b = min(y2a - y1a, h)
+
+            # Ensure valid region before slicing
+            if y2a > y1a and x2a > x1a:
+                image4[y1a:y2a, x1a:x2a] = image[y1b:y2b, x1b:x2b]
+            else:
+                continue  # Skip invalid placements
+
+            padw = x1a - x1b
+            padh = y1a - y1b
+
+            # Labels
+            label = self.labels[index].copy()
+            if label.size:
+                label[:, 1:] = wh2xy(label[:, 1:], w, h, padw, padh)
+            label4.append(label)
+
+        # Concat/clip labels
+        label4 = numpy.concatenate(label4, 0) if label4 else numpy.zeros((0, 5), dtype=numpy.float32)
+        # Clip x and y coordinates separately
+        label4[:, 1::2] = numpy.clip(label4[:, 1::2], 0, mosaic_w)  # x coordinates
+        label4[:, 2::2] = numpy.clip(label4[:, 2::2], 0, mosaic_h)  # y coordinates
 
         # Augment
-        image4, label4 = random_perspective(image4, label4, params, border)
+        image4, label4 = random_perspective(image4, label4, params, (border_h, border_w))
+
+        # Resize mosaic to input_size
+        image4, ratio, pad = resize(image4, self.input_size, self.augment)
+        if label4.size:
+            label4[:, 1:] = wh2xy(label4[:, 1:], image4.shape[1], image4.shape[0], pad[0], pad[1])
 
         return image4, label4
 
@@ -185,10 +515,6 @@ class Dataset(data.Dataset):
         for i, item in enumerate(targets):
             item[:, 0] = i  # add target image index
         return torch.stack(samples, 0), torch.cat(targets, 0), shapes
-
-    
-
-
 
     def load_label(self, filenames):
         path = f'{os.path.dirname(filenames[0])}.cache'
@@ -239,6 +565,46 @@ class Dataset(data.Dataset):
                 pass
         torch.save(x, path)
         return x
+
+
+def resize(image, input_size, augment):
+    shape = image.shape[:2]  # current shape [height, width]
+    
+    if isinstance(input_size, (tuple, list)) and input_size[0] != input_size[1]:
+        target_h, target_w = input_size
+        # Always maintain aspect ratio with rectangular inputs
+        scale = min(target_h / shape[0], target_w / shape[1])
+        new_h = int(round(shape[0] * scale))
+        new_w = int(round(shape[1] * scale))
+        
+        # Resize with preserved aspect ratio
+        image_resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Add gray borders to reach target size
+        dh = target_h - new_h
+        dw = target_w - new_w
+        top, bottom = dh // 2, dh - dh // 2
+        left, right = dw // 2, dw - dw // 2
+        image_resized = cv2.copyMakeBorder(image_resized, top, bottom, left, right, 
+                                         cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        
+        ratio = (scale, scale)
+        pad = (left, top)
+        return image_resized, ratio, pad
+    else:
+        # Handle square input_size
+        input_size = input_size[0] if isinstance(input_size, (tuple, list)) else input_size
+        r = min(input_size / shape[0], input_size / shape[1])
+        if not augment:
+            r = min(r, 1.0)
+        new_size = (int(round(shape[1] * r)), int(round(shape[0] * r)))
+        image_resized = cv2.resize(image, new_size, interpolation=resample() if augment else cv2.INTER_LINEAR)
+        dw = input_size - new_size[0]
+        dh = input_size - new_size[1]
+        top, bottom = dh // 2, dh - dh // 2
+        left, right = dw // 2, dw - dw // 2
+        image_resized = cv2.copyMakeBorder(image_resized, top, bottom, left, right, cv2.BORDER_CONSTANT)
+        return image_resized, (r, r), (dw // 2, dh // 2)
 
 
 def wh2xy(x, w=640, h=640, pad_w=0, pad_h=0):
@@ -292,30 +658,6 @@ def augment_hsv(image, params):
 
     im_hsv = cv2.merge((cv2.LUT(h, lut_h), cv2.LUT(s, lut_s), cv2.LUT(v, lut_v)))
     cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=image)  # no return needed
-
-
-def resize(image, input_size, augment):
-    # Resize and pad image while meeting stride-multiple constraints
-    shape = image.shape[:2]  # current shape [height, width]
-
-    # Scale ratio (new / old)
-    r = min(input_size / shape[0], input_size / shape[1])
-    if not augment:  # only scale down, do not scale up (for better val mAP)
-        r = min(r, 1.0)
-
-    # Compute padding
-    pad = int(round(shape[1] * r)), int(round(shape[0] * r))
-    w = (input_size - pad[0]) / 2
-    h = (input_size - pad[1]) / 2
-
-    if shape[::-1] != pad:  # resize
-        image = cv2.resize(image,
-                           dsize=pad,
-                           interpolation=resample() if augment else cv2.INTER_LINEAR)
-    top, bottom = int(round(h - 0.1)), int(round(h + 0.1))
-    left, right = int(round(w - 0.1)), int(round(w + 0.1))
-    image = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT)  # add border
-    return image, (r, r), (w, h)
 
 
 def candidates(box1, box2):
