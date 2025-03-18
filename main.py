@@ -63,7 +63,7 @@ def train(args, params):
         # Save model summary to a text file
         with open(summary_path, 'w') as f:
             with redirect_stdout(f):
-                summary(generalized_model, (3, 640, 640))
+                summary(generalized_model, (3, args.input_size, args.input_size))
         
         print(f"Model summary saved to {summary_path}")
         
@@ -557,7 +557,7 @@ def test(args, params, model=None, is_train=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input-size', default=640, type=int)
+    parser.add_argument('--input-size', default=256, type=int)
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--local_rank', '--local-rank', default=0, type=int)
     parser.add_argument('--epochs', default=500, type=int)
@@ -565,9 +565,9 @@ def main():
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--yaml_file', type=str, default='utils/args_bionano.yaml',
                         help='Path to the YAML configuration file')
-    parser.add_argument('--save-path', type=str, default='./results/weights_bn_84K_36MB',
+    parser.add_argument('--save-path', type=str, default='./results/cropped_128_v2',
                         help='Directory to save model weights and logs')
-    parser.add_argument('--dataset-dir', type=str, default='./Dataset/bionano_cell',
+    parser.add_argument('--dataset-dir', type=str, default='./Dataset/bionano_cellv3',
                         help='Path to the dataset directory')
 
     args = parser.parse_args()

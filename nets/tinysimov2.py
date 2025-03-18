@@ -258,7 +258,7 @@ def yolo_v8_s(num_classes: int = 20):
     # Example: 3 stages, with 1,2,2 repeated conv blocks
     # widths = [3(input), 32, 64, 128, 256]
     # depths = [1, 2, 2]
-    widths = [3, 16,  64, 128]
+    widths = [3, 4, 8,  16,  64, 128]
     depths = [1, 1, 1, 1]
     return YOLO(widths, depths, num_classes)
 

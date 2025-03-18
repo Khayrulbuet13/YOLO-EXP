@@ -511,10 +511,10 @@ class ComputeLoss:
 
         scores = pred_scores.detach().sigmoid()
         bboxes = (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype)
+
         target_bboxes, target_scores, fg_mask = self.assign(scores, bboxes,
                                                             gt_labels, gt_bboxes, mask_gt,
                                                             anchor_points * stride_tensor)
-
         target_bboxes /= stride_tensor
         target_scores_sum = target_scores.sum()
 
@@ -552,11 +552,9 @@ class ComputeLoss:
 
         if self.num_max_boxes == 0:
             device = true_bboxes.device
-            return (torch.full_like(pred_scores[..., 0], self.nc).to(device),
-                    torch.zeros_like(pred_bboxes).to(device),
+            return (torch.zeros_like(pred_bboxes).to(device),
                     torch.zeros_like(pred_scores).to(device),
-                    torch.zeros_like(pred_scores[..., 0]).to(device),
-                    torch.zeros_like(pred_scores[..., 0]).to(device))
+                    torch.zeros_like(pred_scores[..., 0]).to(device).bool())
 
         i = torch.zeros([2, self.bs, self.num_max_boxes], dtype=torch.long)
         i[0] = torch.arange(end=self.bs).view(-1, 1).repeat(1, self.num_max_boxes)
