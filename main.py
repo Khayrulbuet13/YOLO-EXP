@@ -565,7 +565,7 @@ def main():
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--yaml_file', type=str, default='utils/args_bionano.yaml',
                         help='Path to the YAML configuration file')
-    parser.add_argument('--save-path', type=str, default='./results/cropped_128_v2',
+    parser.add_argument('--save-path', type=str, default='./results/cropped_128_11kPrams_6MB',
                         help='Directory to save model weights and logs')
     parser.add_argument('--dataset-dir', type=str, default='./Dataset/bionano_cellv3',
                         help='Path to the dataset directory')
