@@ -43,31 +43,27 @@ def train(args, params):
     # -----------------------------------------------
     # 1) Initialize Comet Logger and Build model
     # -----------------------------------------------
-    # Initialize Comet logger if we're the main process
-    comet_logger = None
+    # Initialize Comet logger if we're the main process    comet_logger = None
     if args.local_rank == 0:
         comet_logger = CometLogger(args, params)
     
     num_classes = len(params['names'].values())
-    model = tinysimov2.yolo_v8_s(num_classes).cuda()
+    model = tinysimov2.yolo_v8_s(num_classes, img_size=args.img_size).cuda()  # Changed
     
     # Create backbone wrapper and save model summary
     if args.local_rank == 0:
-        # Ensure results directory exists
         os.makedirs(args.save_path, exist_ok=True)
-        
-        # Create a generalized wrapper for any model
         summary_path = os.path.join(args.save_path, 'model_summary.txt')
         generalized_model = GeneralizedBackboneWrapper(model.net).cuda()
 
         # Save model summary to a text file
         with open(summary_path, 'w') as f:
             with redirect_stdout(f):
-                summary(generalized_model, (3, args.input_size, args.input_size))
+                h, w = args.img_size  # Changed
+                summary(generalized_model, (3, h, w))  # Simplified
         
         print(f"Model summary saved to {summary_path}")
         
-        # Log source code from nets/ directory
         if comet_logger:
             comet_logger.log_source_code('nets/')
             comet_logger.log_model_summary()
@@ -78,7 +74,6 @@ def train(args, params):
     accumulate = max(round(64 / (args.batch_size * args.world_size)), 1)
     params['weight_decay'] *= args.batch_size * args.world_size * accumulate / 64
 
-    # Separate parameters (conv.weight, bn.weight, bn.bias, etc.)
     p = [], [], []
     for v in model.modules():
         if hasattr(v, 'bias') and isinstance(v.bias, torch.nn.Parameter):
@@ -115,7 +110,7 @@ def train(args, params):
             line = line.rstrip().split('/')[-1]
             train_filenames.append(os.path.join(args.dataset_dir, 'images/train', line))
 
-    dataset = Dataset(train_filenames, args.input_size, params, True)
+    dataset = Dataset(train_filenames, args.img_size, params, True)  # Changed
     if args.world_size <= 1:
         sampler = None
     else:
@@ -149,7 +144,7 @@ def train(args, params):
     criterion = util.ComputeLoss(model, params)
     num_warmup = max(round(params['warmup_epochs'] * num_batch), 1000)
 
-    # step.csv for logging
+     # step.csv for logging
     with open(os.path.join(args.save_path, 'step.csv'), 'w', newline='') as csv_f:
         if args.local_rank == 0:
             writer = csv.DictWriter(csv_f, fieldnames=[
@@ -159,9 +154,6 @@ def train(args, params):
             ])
             writer.writeheader()
 
-        # ---------------------
-        #   For each epoch
-        # ---------------------
         for epoch in range(args.epochs):
             model.train()
 
@@ -179,7 +171,6 @@ def train(args, params):
                 p_bar = tqdm.tqdm(p_bar, total=num_batch)
 
             optimizer.zero_grad()
-
             # -----------------------------------------------
             # 6) Batch iteration
             # -----------------------------------------------
@@ -349,10 +340,10 @@ def test(args, params, model=None, is_train=False):
                 filenames.append(os.path.join(args.dataset_dir, 'images/val', line))
 
     # Build dataset/loader
-    dataset = Dataset(filenames, args.input_size, params, False)
+    dataset = Dataset(filenames, args.img_size, params, False)  # Changed
     loader = data.DataLoader(
         dataset,
-        batch_size=8,      # same as old version (for faster eval)
+        batch_size=8,
         shuffle=False,
         num_workers=8,
         pin_memory=True,
@@ -557,20 +548,29 @@ def test(args, params, model=None, is_train=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input-size', default=256, type=int)
+    parser.add_argument('--input-size', default='256', type=str,
+                      help='Input size as int (square) or HxW (rectangular)')
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--local_rank', '--local-rank', default=0, type=int)
     parser.add_argument('--epochs', default=500, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--yaml_file', type=str, default='utils/args_bionano.yaml',
-                        help='Path to the YAML configuration file')
-    parser.add_argument('--save-path', type=str, default='./results/cropped_128_11kPrams_6MB',
-                        help='Directory to save model weights and logs')
-    parser.add_argument('--dataset-dir', type=str, default='./Dataset/bionano_cellv3',
-                        help='Path to the dataset directory')
+                      help='Path to the YAML configuration file')
+    parser.add_argument('--save-path', type=str, default='./results/test_rect_3',
+                      help='Directory to save model weights and logs')
+    parser.add_argument('--dataset-dir', type=str, default='./Dataset/bionano_cellv2',
+                      help='Path to the dataset directory')
 
     args = parser.parse_args()
+
+    # --- Image size parsing ---
+    if 'x' in args.input_size:
+        h, w = map(int, args.input_size.split('x'))
+        args.img_size = (h, w)
+    else:
+        size = int(args.input_size)
+        args.img_size = (size, size)
 
     args.local_rank = int(os.getenv('LOCAL_RANK', '0'))
     args.world_size = int(os.getenv('WORLD_SIZE', '1'))
@@ -579,10 +579,8 @@ def main():
         torch.cuda.set_device(device=args.local_rank)
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
-    # Prepare directories
     if args.local_rank == 0:
-        if not os.path.exists(args.save_path):
-            os.makedirs(args.save_path)
+        os.makedirs(args.save_path, exist_ok=True)
 
     util.setup_seed()
     util.setup_multi_processes()
