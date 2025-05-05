@@ -3,6 +3,11 @@
 .history/
 Dataset/
 results/
+dump/
+Keras/.history
+Keras/Dataset/
+Keras/results/
+Keras/utils/__pycache__
 __pycache__/
 nets/__pycache__/
 utils/__pycache__/
@@ -13,3 +18,4 @@ README.md
 README.pdf
 secrets.json
 diff.txt
+
