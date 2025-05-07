@@ -13,10 +13,13 @@ import tqdm
 import yaml
 from torch.utils import data
 
+# Import our gradient stabilization tools
+from utils.gradient_stabilizer import AdaptiveScaler, GradientStabilizer, create_optimizer_with_param_groups
+
 
 from nets import pico
 from nets import darknet
-from nets import tinysimov2
+from nets import tinysimov4
 from utils import util
 from utils.util import GeneralizedBackboneWrapper, generate_colors, visualize_predictions
 from utils.dataset import Dataset
@@ -48,7 +51,16 @@ def train(args, params):
         comet_logger = CometLogger(args, params)
     
     num_classes = len(params['names'].values())
-    model = tinysimov2.yolo_v8_s(num_classes, img_size=args.img_size).cuda()  # Changed
+    model = tinysimov4.yolo_v8_s(num_classes, img_size=args.img_size).cuda()  # Changed
+    
+    # He initialization with mode compensation
+    for m in model.modules():
+        if isinstance(m, torch.nn.Conv2d):
+            torch.nn.init.kaiming_normal_(m.weight, 
+                                        mode='fan_out', 
+                                        nonlinearity='relu')
+            if m.bias is not None:
+                torch.nn.init.constant_(m.bias, 0.01)  # Small positive bias
     
     # Create backbone wrapper and save model summary
     if args.local_rank == 0:
@@ -83,14 +95,17 @@ def train(args, params):
         elif hasattr(v, 'weight') and isinstance(v.weight, torch.nn.Parameter):
             p[0].append(v.weight)
 
-    optimizer = torch.optim.SGD(
-        p[2],
-        params['lr0'],
-        params['momentum'],
-        nesterov=True
+    # Use our parameter-wise optimizer with reduced base learning rate
+    base_lr = params['lr0'] * 0.001  # Reduce base LR by 1000x for ReLU stability
+    
+    # Create optimizer with parameter-wise scaling
+    optimizer = create_optimizer_with_param_groups(
+        model, 
+        base_lr=base_lr, 
+        momentum=params['momentum'], 
+        weight_decay=params['weight_decay']
     )
-    optimizer.add_param_group({'params': p[0], 'weight_decay': params['weight_decay']})
-    optimizer.add_param_group({'params': p[1]})
+    # Parameters are already added during optimizer initialization
     del p
 
     lr_func = learning_rate(args, params)
@@ -136,13 +151,19 @@ def train(args, params):
         )
 
     # -----------------------------------------------
-    # 5) Training Loop
+    # 5) Training Loop with Gradient Stabilization
     # -----------------------------------------------
     best = 0
     num_batch = len(loader)
-    amp_scale = torch.cuda.amp.GradScaler()
+    
+    # Replace standard GradScaler with our AdaptiveScaler
+    amp_scale = AdaptiveScaler()
+    
+    # Initialize the gradient stabilizer with conservative initial values
+    grad_stabilizer = GradientStabilizer(model, initial_max_grad_value=5.0, initial_max_grad_norm=2.0)
+    
     criterion = util.ComputeLoss(model, params)
-    num_warmup = max(round(params['warmup_epochs'] * num_batch), 1000)
+    num_warmup = max(round(params['warmup_epochs'] * num_batch * 2), 2000)  # Longer warmup for ReLU
 
      # step.csv for logging
     with open(os.path.join(args.save_path, 'step.csv'), 'w', newline='') as csv_f:
@@ -211,11 +232,26 @@ def train(args, params):
 
                 # Backprop
                 amp_scale.scale(loss).backward()
+                # Add after backward pass
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        grad_mean = param.grad.abs().mean()
+                        if grad_mean < 1e-7:
+                            print(f"Vanishing gradient in {name} ({grad_mean:.3e})")
+                        elif grad_mean > 1e2:
+                            print(f"Exploding gradient in {name} ({grad_mean:.3e})")
 
                 # Gradient accumulation
                 if x % accumulate == 0:
                     amp_scale.unscale_(optimizer)
-                    util.clip_gradients(model)
+                    
+                    # Apply our comprehensive gradient stabilization
+                    grad_stabilizer.clip_gradients()
+                    grad_stabilizer.emergency_gradient_reset()
+                    
+                    # Log gradient statistics every 50 batches
+                    grad_stabilizer.log_gradient_stats(comet_logger if args.local_rank == 0 else None, i)
+                    
                     amp_scale.step(optimizer)
                     amp_scale.update()
                     optimizer.zero_grad()
@@ -238,11 +274,18 @@ def train(args, params):
 
             # Scheduler step after each epoch
             scheduler.step()
+            
+            # Update gradient stabilizer constraints based on epoch performance
+            grad_stabilizer.update_constraints(epoch)
 
             # -----------------------------------------------
             # 7) Evaluation & Logging
             # -----------------------------------------------
             if args.local_rank == 0:
+                # Run weight sanity check before validation
+                if grad_stabilizer.check_weight_sanity():
+                    print("Weight sanity check detected and fixed issues")
+                
                 # Evaluate on training data
                 print("Evaluating on training data...")
                 train_tp, train_fp, train_precision, train_recall, train_map50, train_mean_ap = test(args, params, ema.ema, is_train=True)
@@ -552,12 +595,12 @@ def main():
                       help='Input size as int (square) or HxW (rectangular)')
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--local_rank', '--local-rank', default=0, type=int)
-    parser.add_argument('--epochs', default=500, type=int)
+    parser.add_argument('--epochs', default=5000, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--yaml_file', type=str, default='utils/args_bionano.yaml',
                       help='Path to the YAML configuration file')
-    parser.add_argument('--save-path', type=str, default='./results/rect_256x128_check',
+    parser.add_argument('--save-path', type=str, default='./results/rect_256x128_relu_longer_lr001_newCONV',
                       help='Directory to save model weights and logs')
     parser.add_argument('--dataset-dir', type=str, default='./Dataset/bionano_cellv2',
                       help='Path to the dataset directory')

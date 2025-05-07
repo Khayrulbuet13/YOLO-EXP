@@ -3,14 +3,9 @@ This implementation is the same as `nets/tinysimov2.py` but with the CONV activa
 changed from SiLU to ReLU.
 """
 
-
-
 import math
 import torch
 from utils.util import make_anchors
-
-
-
 
 def pad(k, p=None, d=1):
     if d > 1:
@@ -39,8 +34,6 @@ def fuse_conv(conv, norm):
     return fused_conv
 
 class DFL(torch.nn.Module):
-    # Integral module of Distribution Focal Loss (DFL)
-    # Generalized Focal Loss https://ieeexplore.ieee.org/document/9792391
     def __init__(self, ch=16):
         super().__init__()
         self.ch = ch
@@ -53,19 +46,29 @@ class DFL(torch.nn.Module):
         x = x.view(b, 4, self.ch, a).transpose(2, 1)
         return self.conv(x.softmax(1)).view(b, 4, a)
 
+from utils.gradient_stabilizer import StabilizedConv
 
-class Conv(torch.nn.Module):
+class Conv(StabilizedConv):
+    """
+    Conv block with gradient scaling and monitoring
+    """
     def __init__(self, in_ch, out_ch, k=1, s=1, p=None, d=1, g=1):
-        super().__init__()
-        self.conv = torch.nn.Conv2d(in_ch, out_ch, k, s, pad(k, p, d), d, g, bias=False)
-        self.norm = torch.nn.BatchNorm2d(out_ch, 0.001, 0.03)
-        self.relu = torch.nn.ReLU(inplace=True)
-
+        super().__init__(in_ch, out_ch, k, s, p, d, g)
+        self.grad_scale = 0.15  # Balanced gradient scaling
+        self.register_full_backward_hook(self._gradient_hook)
+        self.norm = torch.nn.BatchNorm2d(out_ch, 1e-5, 0.01)
+        self.relu = self.act
+        
+    def _gradient_hook(self, module, grad_input, grad_output):
+        # Wider clipping range for ReLU stability
+        scaled_grads = tuple(torch.clamp(g * self.grad_scale, -0.5, 0.5) for g in grad_input)
+        return scaled_grads
+        
     def forward(self, x):
-        return self.relu(self.norm(self.conv(x)))
-
-    def fuse_forward(self, x):
-        return self.relu(self.conv(x))
+        # Modified scaling factors for ReLU stability
+        x = self.conv(x * 0.2)  # Increased input scaling
+        x = self.norm(x)
+        return self.act(x)  # Removed output scaling
 
 
 class DarkNet(torch.nn.Module):
