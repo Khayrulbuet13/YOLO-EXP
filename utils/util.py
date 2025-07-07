@@ -80,6 +80,8 @@ def visualize_predictions(samples, outputs, gt_boxes, shapes, params, class_colo
     Visualize first 5 images from the val set: draws ground-truth boxes on the
     left, predicted boxes on the right, and saves side-by-side images.
     """
+    
+    
     # Convert single image to CPU numpy
     img = samples[0].cpu().float().numpy()
     img = img.transpose((1, 2, 0))  # CHW -> HWC
@@ -154,15 +156,10 @@ def visualize_predictions(samples, outputs, gt_boxes, shapes, params, class_colo
     plt.close()
 
 
-def setup_seed():
-    """
-    Setup random seed.
-    """
-    random.seed(0)
-    numpy.random.seed(0)
-    torch.manual_seed(0)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+def set_seed(seed=42):
+    random.seed(seed)
+    numpy.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def setup_multi_processes():
@@ -387,7 +384,7 @@ def compute_ap(tp, conf, pred_cls, target_cls, eps=1e-16):
 
 
 def strip_optimizer(filename):
-    x = torch.load(filename, map_location=torch.device('cpu'))
+    x = torch.load(filename, map_location=torch.device('cpu'), weights_only=False)
     x['model'].half()  # to FP16
     for p in x['model'].parameters():
         p.requires_grad = False
@@ -473,7 +470,9 @@ class ComputeLoss:
 
     def __call__(self, outputs, targets):
         x = outputs[1] if isinstance(outputs, tuple) else outputs
+        
         output = torch.cat([i.view(x[0].shape[0], self.no, -1) for i in x], 2)
+        
         pred_output, pred_scores = output.split((4 * self.dfl_ch, self.nc), 1)
 
         pred_output = pred_output.permute(0, 2, 1).contiguous()
@@ -525,11 +524,14 @@ class ComputeLoss:
         # box loss
         loss_box = torch.zeros(1, device=self.device)
         loss_dfl = torch.zeros(1, device=self.device)
+        fg_count = fg_mask.sum()
+        
         if fg_mask.sum():
             # IoU loss
             weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
             loss_box = self.iou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
             loss_box = ((1.0 - loss_box) * weight).sum() / target_scores_sum
+            
             # DFL loss
             a, b = torch.split(target_bboxes, 2, -1)
             target_lt_rb = torch.cat((anchor_points - a, b - anchor_points), -1)
@@ -540,7 +542,9 @@ class ComputeLoss:
         loss_cls *= self.params['cls']
         loss_box *= self.params['box']
         loss_dfl *= self.params['dfl']
-        return loss_cls + loss_box + loss_dfl  # loss(cls, box, dfl)
+        
+        total_loss = loss_cls + loss_box + loss_dfl        
+        return total_loss  # loss(cls, box, dfl)
 
     @torch.no_grad()
     def assign(self, pred_scores, pred_bboxes, true_labels, true_bboxes, true_mask, anchors):
@@ -559,25 +563,32 @@ class ComputeLoss:
         i = torch.zeros([2, self.bs, self.num_max_boxes], dtype=torch.long)
         i[0] = torch.arange(end=self.bs).view(-1, 1).repeat(1, self.num_max_boxes)
         i[1] = true_labels.long().squeeze(-1)
-
+        
+        # Calculate overlaps
         overlaps = self.iou(true_bboxes.unsqueeze(2), pred_bboxes.unsqueeze(1))
         overlaps = overlaps.squeeze(3).clamp(0)
         align_metric = pred_scores[i[0], :, i[1]].pow(self.alpha) * overlaps.pow(self.beta)
+        
         bs, n_boxes, _ = true_bboxes.shape
         lt, rb = true_bboxes.view(-1, 1, 4).chunk(2, 2)  # left-top, right-bottom
         bbox_deltas = torch.cat((anchors[None] - lt, rb - anchors[None]), dim=2)
         mask_in_gts = bbox_deltas.view(bs, n_boxes, anchors.shape[0], -1).amin(3).gt_(1e-9)
+        
         metrics = align_metric * mask_in_gts
         top_k_mask = true_mask.repeat([1, 1, self.top_k]).bool()
+        
         num_anchors = metrics.shape[-1]
         top_k_metrics, top_k_indices = torch.topk(metrics, self.top_k, dim=-1, largest=True)
+        
         if top_k_mask is None:
             top_k_mask = (top_k_metrics.max(-1, keepdim=True) > self.eps).tile([1, 1, self.top_k])
         top_k_indices = torch.where(top_k_mask, top_k_indices, 0)
         is_in_top_k = one_hot(top_k_indices, num_anchors).sum(-2)
+        
         # filter invalid boxes
         is_in_top_k = torch.where(is_in_top_k > 1, 0, is_in_top_k)
         mask_top_k = is_in_top_k.to(metrics.dtype)
+        
         # merge all mask to a final mask, (b, max_num_obj, h*w)
         mask_pos = mask_top_k * mask_in_gts * true_mask
 
@@ -589,6 +600,7 @@ class ComputeLoss:
             is_max_overlaps = is_max_overlaps.permute(0, 2, 1).to(overlaps.dtype)
             mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos)
             fg_mask = mask_pos.sum(-2)
+        
         # find each grid serve which gt(index)
         target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
 
@@ -610,12 +622,17 @@ class ComputeLoss:
 
         # normalize
         align_metric *= mask_pos
+        
         pos_align_metrics = align_metric.amax(axis=-1, keepdim=True)
+        
         pos_overlaps = (overlaps * mask_pos).amax(axis=-1, keepdim=True)
+        
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2)
+        
         norm_align_metric = norm_align_metric.unsqueeze(-1)
+        
         target_scores = target_scores * norm_align_metric
-
+        
         return target_bboxes, target_scores, fg_mask.bool()
 
     @staticmethod
@@ -626,9 +643,13 @@ class ComputeLoss:
         tr = tl + 1  # target right
         wl = tr - target  # weight left
         wr = 1 - wl  # weight right
+        
         l_loss = cross_entropy(pred_dist, tl.view(-1), reduction="none").view(tl.shape)
         r_loss = cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape)
-        return (l_loss * wl + r_loss * wr).mean(-1, keepdim=True)
+        
+        loss = (l_loss * wl + r_loss * wr).mean(-1, keepdim=True)
+        
+        return loss
 
     @staticmethod
     def iou(box1, box2, eps=1e-7):
@@ -654,10 +675,16 @@ class ComputeLoss:
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
         # Complete IoU https://arxiv.org/abs/1911.08287v1
         c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+        
         # center dist ** 2
         rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4
+        
         # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
         v = (4 / math.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
+        
         with torch.no_grad():
             alpha = v / (v - iou + (1 + eps))
-        return iou - (rho2 / c2 + v * alpha)  # CIoU
+        
+        ciou = iou - (rho2 / c2 + v * alpha)  # CIoU
+        
+        return ciou  # CIoU
